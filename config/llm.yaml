@@ -125,6 +125,19 @@ models:
     max_retries: 2
     description: "Modèle par défaut pour toute tâche non explicitement routée"
 
+  # Rôle dédié à l'indexation vectorielle (src/indexing) : production des
+  # embeddings stockés dans ChromaDB. Un modèle d'embedding ne génère pas de
+  # texte : pas de température ni de budget de génération, seule la fiabilité
+  # compte (timeout large, retries). ATTENTION : la dimension des vecteurs
+  # (4096 pour qwen3-embedding) est figée par la première écriture dans une
+  # collection — changer de modèle plus tard impose de ré-embeder le corpus.
+  embedding:
+    model_name: "qwen3-embedding"
+    timeout_seconds: 120
+    keep_alive: "10m"
+    max_retries: 3
+    description: "Produit les embeddings du corpus pour l'indexation vectorielle (src/indexing)"
+
 defaults:
   active_router: "router"
   active_summarizer: "summarizer"

@@ -71,6 +71,14 @@ class LLMConfigError(ConfigError):
     """
 
 
+class VectorConfigError(ConfigError):
+    """setup.yaml's vector_db section is malformed or incomplete.
+
+    Raised at load time by ``validate_vector_config``. Messages are written
+    to be fixed by hand in setup.yaml without a debugger.
+    """
+
+
 PROJECT_ROOT = _find_project_root()
 CONFIG_DIR = PROJECT_ROOT / "config"
 SETUP_YAML_PATH = CONFIG_DIR / "setup.yaml"
@@ -520,6 +528,140 @@ def load_ingestion_config() -> dict:
     """
     config = _load_yaml(INGESTION_YAML_PATH)
     return validate_ingestion_config(config)
+
+
+def validate_vector_config(config: object) -> dict:
+    """Validate setup.yaml's ``vector_db`` section; raise VectorConfigError.
+
+    Checks:
+
+    * the document is a mapping containing a ``vector_db`` mapping;
+    * ``vector_db.path`` is a required, non-empty, usable (non-traversal)
+      path reference — the embedded ChromaDB store's folder;
+    * ``vector_db.collections`` is a required, non-empty mapping. The two
+      collections the system knows are required (``source_chunks`` and
+      ``knowledge_chunks``); any additional key is validated the same way
+      (future collections). Every value must be a non-empty single name
+      (no path separators) and names must be unique across entries — two
+      collections sharing a name would silently be the same store.
+
+    Returns the same dict on success, so callers can do
+    ``config = validate_vector_config(config)``.
+    """
+    prefix = "setup.yaml invalide (section vector_db)"
+
+    if not isinstance(config, dict):
+        raise VectorConfigError(
+            f"{prefix}: le contenu doit être un mapping YAML "
+            f"(type trouvé : {type(config).__name__})."
+        )
+
+    if "vector_db" not in config:
+        raise VectorConfigError(
+            f"{prefix} : section requise manquante 'vector_db'."
+        )
+    vector = config["vector_db"]
+    if not isinstance(vector, dict):
+        raise VectorConfigError(
+            f"{prefix} : 'vector_db' doit être un mapping "
+            f"(type trouvé : {type(vector).__name__})."
+        )
+
+    # -- path ----------------------------------------------------------------
+    if "path" not in vector:
+        raise VectorConfigError(
+            f"{prefix} : clé requise manquante 'vector_db.path' (dossier du "
+            "magasin ChromaDB embarqué)."
+        )
+    path = vector["path"]
+    if not isinstance(path, str):
+        raise VectorConfigError(
+            f"{prefix} : 'vector_db.path' doit être une chaîne "
+            f"(type trouvé : {type(path).__name__})."
+        )
+    if not path.strip():
+        raise VectorConfigError(
+            f"{prefix} : 'vector_db.path' ne doit pas être vide."
+        )
+    if not _is_valid_relative_path(path):
+        raise VectorConfigError(
+            f"{prefix} : 'vector_db.path' ({path!r}) n'est pas un chemin "
+            "utilisable (vide ou contient '..')."
+        )
+
+    # -- collections -----------------------------------------------------------
+    if "collections" not in vector:
+        raise VectorConfigError(
+            f"{prefix} : clé requise manquante 'vector_db.collections' "
+            "(noms des collections source_chunks et knowledge_chunks)."
+        )
+    collections = vector["collections"]
+    if not isinstance(collections, dict):
+        raise VectorConfigError(
+            f"{prefix} : 'vector_db.collections' doit être un mapping "
+            f"(type trouvé : {type(collections).__name__})."
+        )
+    if not collections:
+        raise VectorConfigError(
+            f"{prefix} : 'vector_db.collections' ne doit pas être vide "
+            "(au moins source_chunks et knowledge_chunks)."
+        )
+
+    REQUIRED_COLLECTIONS = ("source_chunks", "knowledge_chunks")
+    for required in REQUIRED_COLLECTIONS:
+        if required not in collections:
+            raise VectorConfigError(
+                f"{prefix} : 'vector_db.collections' : collection requise "
+                f"manquante '{required}'."
+            )
+
+    seen_names: dict = {}
+    for key, name in collections.items():
+        if not isinstance(key, str) or not key.strip():
+            raise VectorConfigError(
+                f"{prefix} : 'vector_db.collections' : nom de collection "
+                f"invalide {key!r} (doit être une chaîne non vide)."
+            )
+        if not isinstance(name, str):
+            raise VectorConfigError(
+                f"{prefix} : 'vector_db.collections.{key}' doit être une "
+                f"chaîne (type trouvé : {type(name).__name__})."
+            )
+        if not name.strip():
+            raise VectorConfigError(
+                f"{prefix} : 'vector_db.collections.{key}' ne doit pas être "
+                "vide."
+            )
+        if ("/" in name or "\\" in name or "\x00" in name
+                or name.strip(". ") != name or name in (".", "..")):
+            raise VectorConfigError(
+                f"{prefix} : 'vector_db.collections.{key}' ({name!r}) doit "
+                "être un nom simple de collection, pas un chemin."
+            )
+        if name in seen_names:
+            raise VectorConfigError(
+                f"{prefix} : 'vector_db.collections.{key}' ({name!r}) "
+                f"duplique le nom déjà utilisé par "
+                f"'vector_db.collections.{seen_names[name]}' — deux "
+                "collections doivent porter des noms distincts."
+            )
+        seen_names[name] = key
+
+    return config
+
+
+@lru_cache(maxsize=1)
+def load_vector_config() -> dict:
+    """Load setup.yaml and return its validated ``vector_db`` section.
+
+    Validates the full vector_db schema at load time (path, collection
+    names) and raises VectorConfigError (a ConfigError subclass) with an
+    explicit message naming the faulty entry — including for a YAML syntax
+    error. Cached: read and validated once per program run.
+    """
+    config = _load_yaml(SETUP_YAML_PATH)
+    validate_vector_config(config)
+    return config["vector_db"]
 
 
 # ------------------------------------------------------------------

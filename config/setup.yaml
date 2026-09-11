@@ -28,3 +28,23 @@ logging:
   max_bytes: 5242880                        # 5 MiB per file
   backup_count: 3                           # keep 3 rotated files
 
+# Vector database — ChromaDB in embedded mode: everything it persists
+# (SQLite metadata, HNSW segments) lives in a simple folder, no server
+# process. The embedding model itself is NOT configured here: it is the
+# "embedding" role of config/llm.yaml.
+vector_db:
+  # Working folder of the embedded store (relative to the project root;
+  # absolute paths are also accepted).
+  path: "data/vector"
+
+  # The two collections:
+  #   source_chunks    — chunks of the DocumentExtract true content (atomic
+  #                      text blocks) plus every summarized level above them
+  #                      (sections, pages, chapters, whole document).
+  #   knowledge_chunks — chunks from the knowledge markdown files.
+  # NOTE: a collection's vector dimension is frozen by its first write —
+  # switching the embedding role's model later means re-embedding everything.
+  collections:
+    source_chunks: "source_chunks"
+    knowledge_chunks: "knowledge_chunks"
+
