@@ -21,8 +21,10 @@ The guard is a two-layer contract:
 
 from __future__ import annotations
 
+import logging
 from typing import Final
 
+_module_logger = logging.getLogger(__name__)
 # Probing sentinel: a client may send this exact content to check the
 # endpoint is alive without triggering analysis, routing or LLM calls.
 META_SENTINEL: Final[str] = "__WINTERMUTE_PING__"
@@ -69,10 +71,55 @@ def meta_answer() -> str:
 
     Honest (it names what happened), zero-cost (no analyzer, no routing,
     no LLM), and worded so a front-end that *displays* the reply instead
-    of discarding it still shows something coherent.
+    of discarding it still shows something coherent. Used as-is when the
+    ``reply_to_meta_request`` switch is off, and as the fallback when the
+    MetaRequestAgent is unavailable or fails.
     """
     return (
         "OK. (This was a background request from your front-end — title, "
         "tags or follow-up suggestions — not a message for Wintermute; "
         "no routing was performed.)"
     )
+
+
+def meta_kind(prompt: str) -> str:
+    """What kind of auxiliary task this prompt is (``"unknown"`` if none
+    matched — call only after :func:`prompt_is_meta`).
+
+    The MetaRequestAgent uses this to tailor its answer (a title wants a
+    few words, follow-ups want a list, tags want tag-like tokens).
+    """
+    collapsed = " ".join(prompt.strip().split()).lower()
+    if "follow-up" in collapsed or "followup" in collapsed:
+        return "followup"
+    if "tag" in collapsed:
+        return "tags"
+    if "title" in collapsed:
+        return "title"
+    return "unknown"
+
+
+def reply_to_meta_requests() -> bool:
+    """The ``reply_to_meta_request`` switch from setup.yaml (default True).
+
+    When True, recognized meta prompts go to the MetaRequestAgent (an LLM
+    answers the front-end's auxiliary task in style); when False, the
+    zero-cost fixed :func:`meta_answer` is returned instead — the switch
+    for low-powered machines. Any config failure defaults to True with a
+    warning: never let a broken setup.yaml silence the front-end.
+    """
+    from src.tools import config_loader
+
+    try:
+        raw = config_loader.load_setup_config().get("reply_to_meta_request", True)
+    except Exception as exc:  # noqa: BLE001 — config problems must not kill the guard
+        _module_logger.warning(
+            "setup.yaml unreadable (%s); defaulting reply_to_meta_request=True", exc
+        )
+        return True
+    if not isinstance(raw, bool):
+        _module_logger.warning(
+            "reply_to_meta_request must be a boolean (got %r); using True", raw
+        )
+        return True
+    return raw

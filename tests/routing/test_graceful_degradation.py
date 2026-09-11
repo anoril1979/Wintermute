@@ -383,10 +383,17 @@ class MetaPromptGuardTest(unittest.TestCase):
         self.assertIn("background", answer)
 
     def test_openai_endpoint_answers_meta_prompt_without_routing(self):
-        client = TestClient(api.app)
+        # The reply_to_meta_request switch is pinned OFF: this test owns
+        # the guard semantics (fixed answer, routing never called) — the
+        # agent-answering mode has its own tests (test_meta_request_agent).
+        # Unpinned, the real agent answered here with a live LLM call.
         with unittest.mock.patch(
+            "src.tools.config_loader.load_setup_config",
+            return_value={"reply_to_meta_request": False},
+        ), unittest.mock.patch(
             "src.routing.routing_orchestrator.run_routing"
         ) as run_routing:
+            client = TestClient(api.app)
             response = client.post(
                 "/v1/chat/completions",
                 json={

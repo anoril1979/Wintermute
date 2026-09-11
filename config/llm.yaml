@@ -84,6 +84,23 @@ models:
     max_retries: 2
     description: "Répond aux requêtes générales (hors corpus) en incarnant Wintermute — ton cyberpunk, knowledge propre du modèle"
 
+  # Rôle dédié au MetaRequestAgent (src/agents/agents/meta_request_agent.py) :
+  # réponses aux tâches d'arrière-plan du front-end (titre de conversation,
+  # tags, suggestions de suivi) interceptées par le garde (src/llm/guard.py).
+  # Modèle léger et réponses courtes : ces appels sont fréquents et leur
+  # résultat n'alimente pas la conversation.
+  meta_request:
+    model_name: "llama3:8b"
+    temperature: 0.7
+    max_response_tokens: 128
+    timeout_seconds: 15
+    top_p: 0.95
+    context_window: 4096       # les tâches meta sont courtes
+    keep_alive: "5m"
+    thinking: false            # mode raisonnement (option Ollama think)
+    max_retries: 1
+    description: "Répond aux tâches d'arrière-plan du front-end (titre, tags, suggestions) — court et léger"
+
   summarizer:
     model_name: "llama3:8b"           # modèle plus capable pour synthèse et rédaction
     temperature: 0.4

@@ -13,6 +13,12 @@ api:
 ollama:
   base_url: "http://localhost:11434"
 
+# Réponses aux requêtes meta du front-end (titre de conversation, tags,
+# suggestions de suivi) : true = le MetaRequestAgent y répond via son rôle
+# LLM (interface consistante, coût faible) ; false = réponse fixe à coût
+# zéro (machines peu puissantes).
+reply_to_meta_request: true
+
 logging:
   level: "INFO"
   format: "%(asctime)s - [%(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"

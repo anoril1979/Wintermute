@@ -46,7 +46,12 @@ logger = logging.getLogger("wintermute")
 # Central logging (console + data/logs/wintermute.log, per setup.yaml).
 # Called here so the durable log file exists whatever the entry point is;
 # idempotent, so the CLI entry points calling it again are no-ops.
-from src.llm.guard import META_SENTINEL, meta_answer, prompt_is_meta
+from src.llm.guard import (
+    META_SENTINEL,
+    meta_answer,
+    prompt_is_meta,
+    reply_to_meta_requests,
+)
 from src.logging_setup import (
     bind_correlation_id,
     configure_logging,
@@ -232,6 +237,14 @@ def _log_snippet(text: str, limit: int = 400) -> str:
     return " ".join(text.split())[:limit]
 
 
+def _raw_last_user_text(messages: List[Message]) -> str:
+    """The last user message's text (the shape _extract_question logs)."""
+    for message in reversed(messages):
+        if message.role == "user" and message.content.strip():
+            return message.content.strip()
+    return messages[-1].content.strip()
+
+
 def _extract_question(messages: List[Message]) -> str:
     """The user's latest utterance.
 
@@ -241,31 +254,51 @@ def _extract_question(messages: List[Message]) -> str:
 
     Meta traffic (the sentinel, or Open WebUI's auxiliary tasks — title
     generation, follow-up suggestions, topic tagging) is intercepted
-    here and never reaches routing: the fixed meta answer is returned,
-    empty text means "skip" for the endpoints.
+    here and never reaches routing: the sentinel marks it for the
+    endpoints, which answer via :func:`_meta_answer_for_prompt`.
     """
     roles = ",".join(m.role for m in messages)
-    for message in reversed(messages):
-        if message.role == "user" and message.content.strip():
-            question = message.content.strip()
-            if prompt_is_meta(question):
-                logger.info(
-                    "Incoming chat: %d message(s) [%s]; "
-                    "meta/background prompt intercepted, no routing: %s",
-                    len(messages), roles, _log_snippet(question),
-                )
-                return META_SENTINEL
-            logger.info(
-                "Incoming chat: %d message(s) [%s]; analyzed text: %s",
-                len(messages), roles, _log_snippet(question),
-            )
-            return question
-    question = messages[-1].content.strip()
+    question = _raw_last_user_text(messages)
+    if prompt_is_meta(question):
+        logger.info(
+            "Incoming chat: %d message(s) [%s]; "
+            "meta/background prompt intercepted, no routing: %s",
+            len(messages), roles, _log_snippet(question),
+        )
+        return META_SENTINEL
     logger.info(
-        "Incoming chat: %d message(s) [%s]; analyzed text (fallback last): %s",
+        "Incoming chat: %d message(s) [%s]; analyzed text: %s",
         len(messages), roles, _log_snippet(question),
     )
     return question
+
+
+def _meta_answer_for_prompt(prompt_text: str) -> str:
+    """Answer an intercepted meta/background prompt.
+
+    The single decision point for the ``reply_to_meta_request`` switch:
+
+    * sentinel probe or switch off  → the zero-cost fixed answer
+      (:func:`meta_answer`) — the low-powered-machine mode;
+    * switch on                     → the MetaRequestAgent answers the
+      front-end's actual task (one cheap LLM call, in-style title/tags/
+      suggestions), degrading to the fixed answer on ANY failure.
+
+    Never raises, never routes, never reaches the analyzer.
+    """
+    if prompt_text == META_SENTINEL or not reply_to_meta_requests():
+        return meta_answer()
+    try:
+        # Imported here like the rest of the API's heavier pieces: the
+        # gateway must stay bootable even if the agents' wiring breaks.
+        from src.agents.agents.meta_request_agent import get_meta_request_agent
+
+        answer = get_meta_request_agent().run(prompt_text)
+    except Exception:  # noqa: BLE001 — a background task must never surface an error
+        logger.exception("The meta agent failed; using the fixed fallback.")
+        return meta_answer()
+    logger.info("Meta request answered by the MetaRequestAgent (%d chars).", len(answer))
+    return answer
 
 
 def _ask(question: str) -> str:
@@ -611,8 +644,11 @@ def chat(request: ChatCompletionRequest, http_request: Request) -> dict:
     question = _extract_question(request.messages)
     if question == META_SENTINEL:
         # Meta/background prompt (front-end auxiliary task or probe):
-        # fixed answer, no analysis, no routing, no LLM call.
-        return _openai_completion(question, meta_answer(), request.model)
+        # answered in place — no analysis, no routing, no graph.
+        return _openai_completion(
+            question, _meta_answer_for_prompt(_raw_last_user_text(request.messages)),
+            request.model,
+        )
 
     if request.stream:
         def sse() -> Iterator[str]:
@@ -696,17 +732,18 @@ def ollama_chat(request: OllamaChatRequest, http_request: Request) -> dict:
     created_at = datetime.now(timezone.utc).isoformat()
 
     if question == META_SENTINEL:
-        # Meta/background prompt (front-end auxiliary task or probe):
-        # fixed answer, no analysis, no routing, no LLM call.
+        # Meta/background prompt: answered in place — no analysis, no
+        # routing, no graph.
+        answer = _meta_answer_for_prompt(_raw_last_user_text(request.messages))
         return {
             "model": request.model,
             "created_at": created_at,
-            "message": {"role": "assistant", "content": meta_answer()},
+            "message": {"role": "assistant", "content": answer},
             "done": True,
             "done_reason": "stop",
             "total_duration": 0,
             "prompt_eval_count": _rough_tokens(question),
-            "eval_count": _rough_tokens(meta_answer()),
+            "eval_count": _rough_tokens(answer),
         }
 
     if request.stream:
