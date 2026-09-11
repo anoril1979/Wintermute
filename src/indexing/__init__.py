@@ -12,10 +12,11 @@ from src.indexing.chunks import (
     LEVEL_SECTION,
     KIND_CONTENT,
     KIND_SUMMARY,
+    SUM_SEGMENT,
     VectorChunk,
     build_knowledge_chunks,
     build_source_chunks,
-    doc_id_from_source_path,
+    doc_id_of,
 )
 from src.indexing.chroma_client import (
     ChromaVectorClient,
@@ -39,7 +40,8 @@ __all__ = [
     "VectorChunk",
     "build_source_chunks",
     "build_knowledge_chunks",
-    "doc_id_from_source_path",
+    "doc_id_of",
+    "SUM_SEGMENT",
     "LEVEL_BLOCK",
     "LEVEL_SECTION",
     "LEVEL_PAGE",

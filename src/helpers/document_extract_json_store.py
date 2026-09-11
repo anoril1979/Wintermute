@@ -22,7 +22,11 @@ Design choices:
 * **Full fidelity** — every field of every model is serialized, so a
   round trip ``extract -> save -> load`` yields an equal ``DocumentExtract``
   (unlike ``document_extract_to_dict``, which is a human-readable *summary*
-  used for debug payloads).
+  used for debug payloads) — including the stable ids
+  (src/extraction/ids.py), preserved from extraction onward.
+* **Id-tolerant loading** — files written before the id scheme existed
+  (or stripped of ids by hand) load fine with empty ids; the extraction
+  agent assigns them on first touch.
 * **Human-editable** — pretty-printed UTF-8 JSON; block/section/page
   numbers stay explicit; ``block_type`` is stored as its string value.
 * **Defensive loading** — the file may have been edited by hand: a
@@ -74,6 +78,7 @@ def _bbox_to_list(bbox: tuple) -> List[float]:
 
 def _block_to_dict(block: TextBlock) -> Dict[str, Any]:
     return {
+        "id": block.id,
         "block_id": block.block_id,
         "page_number": block.page_number,
         "bbox": _bbox_to_list(block.bbox),
@@ -86,6 +91,7 @@ def _block_to_dict(block: TextBlock) -> Dict[str, Any]:
 
 def _section_to_dict(section: Section) -> Dict[str, Any]:
     return {
+        "id": section.id,
         "section_id": section.section_id,
         "blocks": [_block_to_dict(b) for b in section.blocks],
         "page_number": section.page_number,
@@ -100,6 +106,7 @@ def _section_to_dict(section: Section) -> Dict[str, Any]:
 
 def _page_to_dict(page: PageContent) -> Dict[str, Any]:
     return {
+        "id": page.id,
         "page_number": page.page_number,
         "width": page.width,
         "height": page.height,
@@ -121,6 +128,7 @@ def _toc_entry_to_dict(entry: TocEntry) -> Dict[str, Any]:
 
 def _chapter_to_dict(chapter: Chapter) -> Dict[str, Any]:
     return {
+        "id": chapter.id,
         "toc_entry": _toc_entry_to_dict(chapter.toc_entry),
         "pages": [_page_to_dict(p) for p in chapter.pages],
         "full_text": chapter.full_text,
@@ -133,6 +141,7 @@ def document_extract_to_json_dict(doc: DocumentExtract) -> Dict[str, Any]:
     """Full-fidelity, JSON-serializable form of a ``DocumentExtract``."""
     return {
         "schema": SCHEMA_MARKER,
+        "id": doc.id,
         "source_path": doc.source_path,
         "title": doc.title,
         "author": doc.author,
@@ -202,6 +211,7 @@ def _block_from_dict(data: Any, path: str) -> TextBlock:
             f"{path}.block_type: unknown block type {block_type!r}"
         ) from exc
     return TextBlock(
+        id=_require_str(data.get("id", ""), f"{path}.id"),
         block_id=_require_int(data.get("block_id", 0), f"{path}.block_id"),
         page_number=_require_int(data.get("page_number", 0), f"{path}.page_number"),
         bbox=_bbox_from_list(data.get("bbox", [0, 0, 0, 0]), f"{path}.bbox"),
@@ -219,6 +229,7 @@ def _section_from_dict(data: Any, path: str) -> Section:
         for i, item in enumerate(_require_list(data.get("blocks", []), f"{path}.blocks"))
     ]
     return Section(
+        id=_require_str(data.get("id", ""), f"{path}.id"),
         section_id=_require_int(data.get("section_id", 0), f"{path}.section_id"),
         blocks=blocks,
         page_number=_require_int(data.get("page_number", 0), f"{path}.page_number"),
@@ -242,6 +253,7 @@ def _page_from_dict(data: Any, path: str) -> PageContent:
         for i, item in enumerate(_require_list(data.get("sections", []), f"{path}.sections"))
     ]
     return PageContent(
+        id=_require_str(data.get("id", ""), f"{path}.id"),
         page_number=_require_int(data.get("page_number", 0), f"{path}.page_number"),
         width=float(width) if width is not None else None,
         height=float(height) if height is not None else None,
@@ -271,6 +283,7 @@ def _chapter_from_dict(data: Any, path: str) -> Chapter:
         for i, item in enumerate(_require_list(data.get("pages", []), f"{path}.pages"))
     ]
     return Chapter(
+        id=_require_str(data.get("id", ""), f"{path}.id"),
         toc_entry=_toc_entry_from_dict(data["toc_entry"], f"{path}.toc_entry"),
         pages=pages,
         full_text=_require_str(data.get("full_text", ""), f"{path}.full_text"),
@@ -307,6 +320,7 @@ def document_extract_from_json_dict(data: Any) -> DocumentExtract:
     ]
     metadata = _require_mapping(data.get("metadata", {}), "metadata")
     return DocumentExtract(
+        id=_require_str(data.get("id", ""), "root.id"),
         source_path=_require_str(data.get("source_path", ""), "source_path"),
         title=_require_str(data.get("title", ""), "title"),
         author=_require_str(data.get("author", ""), "author"),

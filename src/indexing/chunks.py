@@ -5,36 +5,48 @@ its embedding (filled by the caller — the store never embeds), and the
 scalar metadata that ChromaDB keeps alongside the vector for filtering and
 citations later.
 
-Two families of chunks, matching the two collections of setup.yaml:
+**Ids ride the unified scheme** (src/extraction/ids.py): the document id
+``doc:<8hex>`` is the ``DocumentExtract.id`` assigned by the extraction
+layer — the same id the knowledge layer's ``SourceLocator`` uses — and a
+chunk id is the element's full hierarchical chain:
 
-* **source chunks** (collection ``source_chunks``) — built from a
-  ``DocumentExtract`` by :func:`build_source_chunks`:
+    content, one chunk per text block:
+        ``doc:3fa2b81c::chp:1::pg:2::sec:1::txt:3``
+    summaries (every level above the blocks):
+        ``doc:3fa2b81c::chp:1::pg:2::sec:1::sum``   (section summary)
+        ``doc:3fa2b81c::chp:1::pg:2::sum``          (page summary)
+        ``doc:3fa2b81c::chp:1::sum``                (chapter summary)
+        ``doc:3fa2b81c::sum``                       (document summary)
 
-      - one chunk per **TextBlock** raw_text — the document's true content
-        (blocks == paragraphs everywhere else in the system);
-      - one chunk per **summarized level that is not a block**: section,
-        page, chapter and whole-document summaries (a block's own summary
-        is deliberately NOT indexed — the block's raw_text is the content;
-        its summary is a pipeline-internal view).
+Deterministic by construction → re-indexing a document *updates* its
+chunks instead of duplicating them. A block's own ``summary`` field is
+deliberately NOT indexed: the block's raw_text is the content, its summary
+is a pipeline-internal view.
 
-* **knowledge chunks** (collection ``knowledge_chunks``) — chunks of the
-  knowledge markdown files. Producer (knowledge extraction) not built yet:
-  :func:`build_knowledge_chunks` is a stub raising ``NotImplementedError``.
+The builder requires ids to be assigned (``assign_extract_ids`` — the
+extraction agent's job): identity decisions belong to the extraction
+layer, indexing only consumes them.
 
-Chunk ids are **deterministic** — derived from the document id and the
-chunk's position in the structure, never from a counter or the wall clock.
-Re-ingesting (or re-indexing) a document therefore *updates* its chunks
-instead of duplicating them: the vector store stays consistent with the
-same idempotent spirit as the extraction/summarization job files.
+Knowledge chunks (collection ``knowledge_chunks``) — chunks of the
+knowledge markdown files — have no producer yet: :func:`build_knowledge_chunks`
+is a stub raising ``NotImplementedError``.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
+from src.extraction.ids import (
+    CHP_PREFIX,
+    DOC_PREFIX,
+    PG_PREFIX,
+    SEC_PREFIX,
+    TXT_PREFIX,
+    doc_id_from_filename,
+    full_id,
+)
 from src.extraction.models import DocumentExtract
 
 logger = logging.getLogger(__name__)
@@ -48,13 +60,18 @@ logger = logging.getLogger(__name__)
 # anything else is rejected by the store, so the type is pinned here.
 MetadataValue = str | int | float | bool
 
+#: Suffix segment marking a summary chunk (appended to the element's chain).
+SUM_SEGMENT = "sum"
+
 
 @dataclass
 class VectorChunk:
     """One unit of vector storage: text + metadata + (optional) embedding.
 
     Attributes:
-        id: deterministic, unique within a collection (see module docstring).
+        id: deterministic, unique within a collection — the element's full
+            hierarchical id (``doc:x::chp:1::pg:2::sec:1::txt:3``), with a
+            ``::sum`` suffix for summary chunks.
         text: the text the vector was computed from.
         metadata: scalar (Chroma-compatible) facets: document identity,
             hierarchical position, level/kind. Used later for filtered
@@ -70,35 +87,38 @@ class VectorChunk:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic ids
+# Level / kind vocabulary (metadata facets)
 # ---------------------------------------------------------------------------
 
-#: Level names used in ids and metadata — keep in sync with the builders.
 LEVEL_BLOCK = "block"
 LEVEL_SECTION = "section"
 LEVEL_PAGE = "page"
 LEVEL_CHAPTER = "chapter"
 LEVEL_DOCUMENT = "document"
 
-#: Kind of content a chunk carries (blocks are content; summaries are
-#: LLM-produced digests of a level above the blocks).
 KIND_CONTENT = "content"
 KIND_SUMMARY = "summary"
 
 
-def doc_id_from_source_path(source_path: str) -> str:
-    """The document id used in chunk ids: the source file's stem.
+# ---------------------------------------------------------------------------
+# Document id (consumed from the models — never invented here)
+# ---------------------------------------------------------------------------
 
-    ``data/sources/pdf/Dark Earth - Gazette #1.pdf`` →
-    ``Dark Earth - Gazette #1``. Readable, stable across re-ingestions of
-    the same file, and unique enough within the documents root.
+def doc_id_of(doc: DocumentExtract) -> str:
+    """The document's unified id: ``DocumentExtract.id`` when assigned.
+
+    Raises ``ValueError`` when it is not — indexing must never silently
+    invent an identity that would diverge from the stores and the
+    knowledge layer. The message points at the one-call fix.
     """
-    return Path(source_path).stem
-
-
-def _chunk_id(doc_id: str, parts: list[str]) -> str:
-    """Join the deterministic id: ``<doc_id>::<part>::<part>::...``."""
-    return "::".join([doc_id, *parts])
+    if doc.id and doc.id.strip():
+        return doc.id.strip()
+    raise ValueError(
+        "DocumentExtract has no id: run assign_extract_ids(doc) "
+        "(src/extraction/ids.py) before building chunks — the vector ids "
+        "must use the same unified identity as the stores and the "
+        "knowledge layer."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,19 +139,17 @@ def build_source_chunks(doc: DocumentExtract) -> list[VectorChunk]:
         + 1 per chapter summary           (kind=summary, level=chapter)
         + 1 for the document summary      (kind=summary, level=document)
 
+    Chunk ids and metadata use the unified id scheme (module docstring):
+    the document's ``doc:<8hex>`` id and the flat per-parent element ids
+    already stored on the models.
+
     Returns:
         The chunks, vectors unset (embedding is the caller's job).
 
     Raises:
-        ValueError: if the document has neither a usable source_path nor a
-            title (no id can be derived).
+        ValueError: if the document id is not assigned (see :func:`doc_id_of`).
     """
-    doc_id = doc_id_from_source_path(doc.source_path or doc.title or "")
-    if not doc_id.strip():
-        raise ValueError(
-            "Cannot derive a document id: DocumentExtract has neither a "
-            "source_path nor a title."
-        )
+    doc_id = doc_id_of(doc)
 
     base_meta: dict[str, MetadataValue] = {
         "doc_id": doc_id,
@@ -140,111 +158,217 @@ def build_source_chunks(doc: DocumentExtract) -> list[VectorChunk]:
         "total_pages": doc.total_pages,
     }
 
+    def element_meta(
+        base: dict[str, MetadataValue],
+        *,
+        level: str,
+        kind: str,
+        elem_id: str,
+        chain: str,
+        **extra: MetadataValue,
+    ) -> dict[str, MetadataValue]:
+        meta = dict(base)
+        meta.update(
+            level=level,
+            kind=kind,
+            elem_id=elem_id,
+            full_id=chain,
+        )
+        meta.update(extra)
+        return meta
+
     chunks: list[VectorChunk] = []
     skipped = 0
 
-    for page in doc.all_pages():
-        for section in page.sections:
-            for block in section.blocks:
+    # -- in-chapter pages -----------------------------------------------------
+    for chapter_index, chapter in enumerate(doc.chapters):
+        chapter_id = chapter.id
+        for page_index, page in enumerate(chapter.pages):
+            page_chain = full_id(doc_id, chapter_index=chapter_index, page_index=page_index)
+
+            for section_index, section in enumerate(page.sections):
+                section_chain = f"{page_chain}::{section.id or full_id(doc_id, section_index=section_index).split('::')[-1]}"
+
+                for block_index, block in enumerate(section.blocks):
+                    text = block.raw_text.strip()
+                    if not text:
+                        skipped += 1
+                        continue
+                    block_elem = block.id or full_id(
+                        doc_id, block_index=block_index
+                    ).split("::")[-1]
+                    chain = f"{section_chain}::{block_elem}"
+                    chunks.append(
+                        VectorChunk(
+                            id=chain,
+                            text=text,
+                            metadata=element_meta(
+                                base_meta,
+                                level=LEVEL_BLOCK,
+                                kind=KIND_CONTENT,
+                                elem_id=block_elem,
+                                chain=chain,
+                                page_number=block.page_number,
+                                block_type=str(block.block_type.value),
+                                chapter_id=chapter_id or "",
+                                chapter_title=page.chapter_title or "",
+                                page_id=page.id or "",
+                                section_id=section.id or "",
+                            ),
+                        )
+                    )
+
+                section_text = (section.summary or "").strip()
+                if not section_text:
+                    continue
+                section_elem = section.id or full_id(
+                    doc_id, section_index=section_index
+                ).split("::")[-1]
+                chain = f"{page_chain}::{section_elem}::{SUM_SEGMENT}"
+                chunks.append(
+                    VectorChunk(
+                        id=chain,
+                        text=section_text,
+                        metadata=element_meta(
+                            base_meta,
+                            level=LEVEL_SECTION,
+                            kind=KIND_SUMMARY,
+                            elem_id=section_elem,
+                            chain=chain,
+                            page_number=section.page_number,
+                            section_title=section.section_title or "",
+                            chapter_id=chapter_id or "",
+                            chapter_title=page.chapter_title or "",
+                            page_id=page.id or "",
+                        ),
+                    )
+                )
+
+            page_text = (page.summary or "").strip()
+            if not page_text:
+                continue
+            page_elem = page.id or full_id(
+                doc_id, page_index=page_index
+            ).split("::")[-1]
+            chain = f"{page_chain}::{SUM_SEGMENT}"
+            chunks.append(
+                VectorChunk(
+                    id=chain,
+                    text=page_text,
+                    metadata=element_meta(
+                        base_meta,
+                        level=LEVEL_PAGE,
+                        kind=KIND_SUMMARY,
+                        elem_id=page_elem,
+                        chain=chain,
+                        page_number=page.page_number,
+                        chapter_id=chapter_id or "",
+                        chapter_title=page.chapter_title or "",
+                    ),
+                )
+            )
+
+        chapter_text = (chapter.summary or "").strip()
+        if not chapter_text:
+            continue
+        chapter_elem = chapter_id or full_id(
+            doc_id, chapter_index=chapter_index
+        ).split("::")[-1]
+        chain = full_id(doc_id, chapter_index=chapter_index) + f"::{SUM_SEGMENT}"
+        chunks.append(
+            VectorChunk(
+                id=chain,
+                text=chapter_text,
+                metadata=element_meta(
+                    base_meta,
+                    level=LEVEL_CHAPTER,
+                    kind=KIND_SUMMARY,
+                    elem_id=chapter_elem,
+                    chain=chain,
+                    chapter_title=chapter.toc_entry.title,
+                    start_page=chapter.start_page,
+                    end_page=chapter.end_page,
+                ),
+            )
+        )
+
+    # -- orphan pages -----------------------------------------------------------
+    for orphan_index, orphan in enumerate(doc.orphan_pages):
+        orphan_chain = full_id(doc_id, page_index=orphan_index)
+
+        for section_index, section in enumerate(orphan.sections):
+            section_elem = section.id or full_id(
+                doc_id, section_index=section_index
+            ).split("::")[-1]
+
+            for block_index, block in enumerate(section.blocks):
                 text = block.raw_text.strip()
                 if not text:
                     skipped += 1
                     continue
-                meta = dict(base_meta)
-                meta.update(
-                    level=LEVEL_BLOCK,
-                    kind=KIND_CONTENT,
-                    page_number=block.page_number,
-                    block_id=block.block_id,
-                    block_type=str(block.block_type.value),
-                    section_id=section.section_id,
-                    chapter_title=page.chapter_title or "",
-                )
+                block_elem = block.id or full_id(
+                    doc_id, block_index=block_index
+                ).split("::")[-1]
+                chain = f"{orphan_chain}::{section_elem}::{block_elem}"
                 chunks.append(
                     VectorChunk(
-                        id=_chunk_id(
-                            doc_id,
-                            [LEVEL_BLOCK, str(block.page_number), str(block.block_id)],
-                        ),
+                        id=chain,
                         text=text,
-                        metadata=meta,
+                        metadata=element_meta(
+                            base_meta,
+                            level=LEVEL_BLOCK,
+                            kind=KIND_CONTENT,
+                            elem_id=block_elem,
+                            chain=chain,
+                            page_number=block.page_number,
+                            block_type=str(block.block_type.value),
+                            chapter_id="",
+                            chapter_title=orphan.chapter_title or "",
+                            page_id=orphan.id or "",
+                            section_id=section_elem,
+                        ),
                     )
                 )
 
-            section_text = (section.summary or "").strip()
-            if not section_text:
-                continue
-            meta = dict(base_meta)
-            meta.update(
-                level=LEVEL_SECTION,
-                kind=KIND_SUMMARY,
-                page_number=section.page_number,
-                section_id=section.section_id,
-                section_title=section.section_title or "",
-                chapter_title=page.chapter_title or "",
-            )
-            chunks.append(
-                VectorChunk(
-                    id=_chunk_id(
-                        doc_id,
-                        [KIND_SUMMARY, LEVEL_SECTION,
-                         str(section.page_number), str(section.section_id)],
-                    ),
-                    text=section_text,
-                    metadata=meta,
-                )
-            )
-
-        page_text = (page.summary or "").strip()
-        if not page_text:
+        orphan_text = (orphan.summary or "").strip()
+        if not orphan_text:
             continue
-        meta = dict(base_meta)
-        meta.update(
-            level=LEVEL_PAGE,
-            kind=KIND_SUMMARY,
-            page_number=page.page_number,
-            chapter_title=page.chapter_title or "",
-        )
+        orphan_elem = orphan.id or full_id(
+            doc_id, page_index=orphan_index
+        ).split("::")[-1]
+        chain = f"{orphan_chain}::{SUM_SEGMENT}"
         chunks.append(
             VectorChunk(
-                id=_chunk_id(doc_id, [KIND_SUMMARY, LEVEL_PAGE, str(page.page_number)]),
-                text=page_text,
-                metadata=meta,
-            )
-        )
-
-    for chapter_index, chapter in enumerate(doc.chapters):
-        chapter_text = (chapter.summary or "").strip()
-        if not chapter_text:
-            continue
-        meta = dict(base_meta)
-        meta.update(
-            level=LEVEL_CHAPTER,
-            kind=KIND_SUMMARY,
-            chapter_index=chapter_index,
-            chapter_title=chapter.toc_entry.title,
-            start_page=chapter.start_page,
-            end_page=chapter.end_page,
-        )
-        chunks.append(
-            VectorChunk(
-                id=_chunk_id(
-                    doc_id, [KIND_SUMMARY, LEVEL_CHAPTER, str(chapter_index)]
+                id=chain,
+                text=orphan_text,
+                metadata=element_meta(
+                    base_meta,
+                    level=LEVEL_PAGE,
+                    kind=KIND_SUMMARY,
+                    elem_id=orphan_elem,
+                    chain=chain,
+                    page_number=orphan.page_number,
+                    chapter_id="",
+                    chapter_title=orphan.chapter_title or "",
                 ),
-                text=chapter_text,
-                metadata=meta,
             )
         )
 
+    # -- document summary ---------------------------------------------------------
     doc_text = (doc.summary or "").strip()
     if doc_text:
-        meta = dict(base_meta)
-        meta.update(level=LEVEL_DOCUMENT, kind=KIND_SUMMARY)
+        chain = f"{doc_id}::{SUM_SEGMENT}"
         chunks.append(
             VectorChunk(
-                id=_chunk_id(doc_id, [KIND_SUMMARY, LEVEL_DOCUMENT]),
+                id=chain,
                 text=doc_text,
-                metadata=meta,
+                metadata=element_meta(
+                    base_meta,
+                    level=LEVEL_DOCUMENT,
+                    kind=KIND_SUMMARY,
+                    elem_id="",
+                    chain=chain,
+                ),
             )
         )
 

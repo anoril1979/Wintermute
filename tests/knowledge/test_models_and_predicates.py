@@ -109,7 +109,7 @@ class ClaimStructuralTestCase(unittest.TestCase):
                 subject_id="char:jean",
                 predicate=Predicate.OCCUPATION,
                 value="mayor",
-                sources=[SourceLocator(source_type=SourceType.PDF, title="t", path="/abs/x.pdf")],
+                sources=[SourceLocator(source_type=SourceType.PDF, title="t", id="doc:abc12345", path="/abs/x.pdf")],
             )
 
     def test_sources_accept_source_refs(self):
@@ -129,6 +129,7 @@ class SourceLocatorHierarchyTestCase(unittest.TestCase):
         locator = SourceLocator(
             source_type=SourceType.HTML,
             title="Example",
+            id="doc:webpage1",
             path="https://example.org",
             page_count=1,
         )
@@ -142,6 +143,7 @@ class SourceLocatorHierarchyTestCase(unittest.TestCase):
             source_type=SourceType.PDF,
             title="Dumas.pdf",
             path="data/dumas.pdf",
+            id="doc:dumas001",
             page_count=3,
             sections=[
                 Section(
@@ -170,6 +172,7 @@ class SourceLocatorHierarchyTestCase(unittest.TestCase):
             data = dict(
                 source_type=SourceType.PDF,
                 title="Book",
+                id="doc:abcdef01",
                 page_count=3,
                 sections=[
                     Section(
@@ -233,6 +236,7 @@ class SourceLocatorHierarchyTestCase(unittest.TestCase):
         sparse = SourceLocator(
             source_type=SourceType.PDF,
             title="Dumas.pdf",
+            id="doc:sparse01",
             page_count=300,
             sections=[
                 Section(

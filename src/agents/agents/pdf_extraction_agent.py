@@ -72,6 +72,7 @@ from src.helpers.document_extract_json_store import (
     load_extract,
     save_extract,
 )
+from src.extraction.ids import assign_extract_ids
 from src.extraction.models import DocumentExtract
 from src.extraction.mineru_pdf_extractor import MineruPDFExtractor
 from src.extraction.validation import (
@@ -225,9 +226,25 @@ class PDFExtractionAgent:
                 detail="extractor returned no document",
             )
 
+        # Unified ids (src/extraction/ids.py) — assigned before any
+        # persistence so the canonical JSON carries them from birth. A
+        # document with no derivable name is an input problem, not a
+        # backend one.
+        try:
+            assign_extract_ids(document)
+        except ValueError as exc:
+            context.emit("task", "extraction_failed", str(exc))
+            return AgentResult(
+                agent_name=self.name,
+                status=AgentStatus.FAILED,
+                failure_domain=FailureDomain.INPUT_DATA,
+                detail=str(exc),
+            )
+
         context.outputs[self._output_key] = document
         context.metadata.update(
             {
+                "document_id": document.id,
                 "document_title": document.title,
                 "total_pages": document.total_pages,
                 "chapter_count": len(document.chapters),
@@ -313,6 +330,7 @@ class PDFExtractionAgent:
                      document=name, path=str(canonical_path))
         try:
             document = load_extract(canonical_path)
+            assign_extract_ids(document)  # id-less legacy file: fill ids in
         except ExtractJsonError as exc:
             # A hand-edit gone wrong must not wedge the pipeline: report,
             # then fall through to a fresh extraction that overwrites it.
@@ -326,6 +344,7 @@ class PDFExtractionAgent:
         context.outputs[self._output_key] = document
         context.metadata.update(
             {
+                "document_id": document.id,
                 "document_title": document.title,
                 "total_pages": document.total_pages,
                 "chapter_count": len(document.chapters),
@@ -374,6 +393,7 @@ class PDFExtractionAgent:
                 saved_bypass = self.extractor.bypass_ocr
                 self.extractor.bypass_ocr = True
                 document = self.extractor.extract(context.document_path)
+                assign_extract_ids(document)  # unified ids before the self-heal save
             except (FileNotFoundError, ValueError, OSError) as exc:
                 logger.info(
                     "Checkpoint hit but artifacts unusable for '%s' (%s); "
@@ -393,6 +413,7 @@ class PDFExtractionAgent:
             context.outputs[self._output_key] = document
             context.metadata.update(
                 {
+                    "document_id": document.id,
                     "document_title": document.title,
                     "total_pages": document.total_pages,
                     "chapter_count": len(document.chapters),

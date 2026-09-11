@@ -35,10 +35,10 @@ class SourceType(str, Enum):
 
 
 # -------------------------------------------------------------------
-# Unique IDs factory
+# Unique IDs
 # -------------------------------------------------------------------
 
-# Process-local counters used to auto-generate sequential ids per kind.
+# Process-local counter used to auto-generate sequential claim ids.
 
 def _make_id_factory(prefix: str):
     """Return a factory generating sequential ids like ``<prefix>:001``."""
@@ -53,8 +53,13 @@ def _make_id_factory(prefix: str):
     return factory
 
 
-_next_source_id = _make_id_factory("source")
 _next_claim_id = _make_id_factory("claim")
+
+# NOTE — Source ids are NOT generated here anymore: a source id is the
+# document's extraction id (``doc:<8hex>``, src/extraction/ids.py) — one
+# unified identity across the extraction stores, the vector chunks and the
+# knowledge layer. SourceLocator.id is therefore required at construction;
+# producers build locators from a DocumentExtract's id.
 
 
 # -------------------------------------------------------------------
@@ -108,8 +113,11 @@ class SourceLocator(BaseModel):
         title: Title of the document — file name, book/PDF title, website
             name for a URL, ...
         path: Path to the document — a local relative path or a valid URL.
-        id: Unique identifier based on incrementation, e.g. ``source:001``.
-            Auto-generated on creation unless provided explicitly.
+        id: Unique identifier of the document — the extraction layer's
+            unified id (``doc:<8hex>``, src/extraction/ids.py), shared by
+            the extraction JSON stores, the vector chunks and the knowledge
+            layer. Required at construction (no auto-generation: identity
+            must come from the extraction, never be invented here).
         page_count: Total number of pages in the document — a GLOBAL,
             continuous count (a book is made of N pages, numbered 1..N
             across all sections). Always >= 1: a document has at least one
@@ -132,7 +140,7 @@ class SourceLocator(BaseModel):
     source_type: SourceType
     title: str
     path: Optional[str] = Field(default=None)
-    id: str = Field(default_factory=_next_source_id)
+    id: str
     page_count: int = Field(ge=1)
     sections: List[Section] = Field(
         default_factory=lambda: [Section(section_index=0, pages=[Page(page_index=0)])],

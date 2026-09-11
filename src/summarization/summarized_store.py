@@ -69,16 +69,19 @@ class SummarizedJsonError(ValueError):
 # ---------------------------------------------------------------------------
 
 def _strip_summaries(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursive removal of every ``summary`` key from a serialized document.
+    """Recursive removal of ``summary`` and ``id`` keys from a serialized document.
 
     The fingerprint must describe the *content* only: identical content
     yields an identical fingerprint whether or not summaries were computed
-    yet.
+    yet. ``id`` keys are stripped for the same reason — ids are identity,
+    not content, so assigning ids (new extraction, or a file touched before
+    the id scheme existed) must not invalidate already-computed summaries.
     """
 
     def clean(node: Any) -> Any:
         if isinstance(node, dict):
-            return {k: clean(v) for k, v in node.items() if k != "summary"}
+            return {k: clean(v) for k, v in node.items()
+                    if k not in ("summary", "id")}
         if isinstance(node, list):
             return [clean(v) for v in node]
         return node
@@ -87,11 +90,13 @@ def _strip_summaries(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def content_fingerprint(doc: DocumentExtract) -> str:
-    """SHA-256 (hex) of the document's content, summaries excluded.
+    """SHA-256 (hex) of the document's content, summaries AND ids excluded.
 
     Stable across the summarization step itself: computed on the
     pre-summarization document or on the summarized one, it yields the
-    same value — that is what makes the resume check reliable.
+    same value — that is what makes the resume check reliable. Ids are
+    excluded too (identity, not content): id assignment must never
+    invalidate stored summaries.
     """
     payload = _strip_summaries(document_extract_to_json_dict(doc))
     digest_input = json.dumps(

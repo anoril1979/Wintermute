@@ -5,6 +5,16 @@ blocks, grouped into sections, assembled into pages, aligned on the
 document's table of contents to form chapters. ``DocumentExtract`` is the
 root object exchanged with the rest of the ingestion pipeline.
 
+Stable identities (src/extraction/ids.py): every element carries an ``id``
+— the document ``doc:<8hex>`` (hash of the source filename), and flat
+per-parent element ids (``chp:x``, ``pg:x``, ``sec:x``, ``txt:x``, 1-based
+within the parent). Assigned by the extraction layer (``assign_extract_ids``),
+persisted by the canonical JSON store, and used downstream as vector chunk
+ids/metadata and as the knowledge layer's source ids. ``""`` (empty) means
+"not yet assigned" — legacy files without ids stay loadable; the agent
+fills them in on first touch. The full hierarchical id
+(``doc:x::chp:1::pg:2::sec:1::txt:3``) is built on the fly, never stored.
+
 Moved from the prototype (``src/ingestion/old/rag_models.py``) — the legacy
 module still exists for the old pipeline; new code imports from here.
 """
@@ -35,7 +45,11 @@ class TocEntry:
 
 @dataclass
 class TextBlock:
-    """Bloc de texte atomique extrait d'une page."""
+    """Bloc de texte atomique extrait d'une page.
+
+    ``id``: flat per-parent id ``txt:x`` (1-based within its section),
+    assigned by the extraction layer — empty until then.
+    """
     block_id: int
     page_number: int            # Index 1
     bbox: tuple[float, float, float, float]   # (x0, y0, x1, y1)
@@ -43,11 +57,15 @@ class TextBlock:
     summary: Optional[str] = None  # Résumé (produit par étape suivante du pipeline)
     block_type: BlockType = BlockType.TEXT
     text_level: int = 0
+    id: str = ""
 
 
 @dataclass
 class Section:
-    """Section/Partie d'une page."""
+    """Section/Partie d'une page.
+
+    ``id``: flat per-parent id ``sec:x`` (1-based within its page).
+    """
     section_id: int
     blocks: list[TextBlock]
     page_number: int            # Index 1
@@ -57,11 +75,16 @@ class Section:
     section_title: Optional[str] = None
     section_level: int = 0
     is_orphan: bool = False
+    id: str = ""
 
 
 @dataclass
 class PageContent:
-    """Contenu complet d'une page."""
+    """Contenu complet d'une page.
+
+    ``id``: flat per-parent id ``pg:x`` (1-based within its chapter, or
+    within the orphan list for orphan pages).
+    """
     page_number: int            # Index 1
     width: float
     height: float
@@ -69,16 +92,22 @@ class PageContent:
     summary: Optional[str] = None  # Résumé (produit par étape suivante du pipeline)
     sections: list[Section] = field(default_factory=list)
     chapter_title: Optional[str] = None
+    id: str = ""
 
 
 @dataclass
 class Chapter:
-    """Section/Chapitre logique du document, alignée sur une entrée TOC."""
+    """Section/Chapitre logique du document, alignée sur une entrée TOC.
+
+    ``id``: flat per-parent id ``chp:x`` (1-based within the document's
+    chapter list).
+    """
     toc_entry: TocEntry
     pages: list[PageContent] = field(default_factory=list)
     full_text: str = ""          # Texte brut agrégé du chapitre
     summary: Optional[str] = None  # Résumé (produit par étape suivante du pipeline)
     metadata: dict = field(default_factory=dict)
+    id: str = ""
 
     @property
     def start_page(self) -> int:
@@ -96,12 +125,19 @@ class DocumentExtract:
     """
     Objet racine produit par le PDFExtractor.
     C'est l'unité d'échange avec le reste du pipeline RAG.
+
+    ``id``: the document's stable identity ``doc:<8hex>`` — SHA-256 of the
+    lowercased source filename with extension (see src/extraction/ids.py).
+    This is THE unified source id: the knowledge layer's SourceLocator.id,
+    the vector chunk id prefix, and the stores' cross-reference. Empty until
+    the extraction layer assigns it.
     """
-    source_path: str
-    title: str
-    author: str
-    subject: str
-    total_pages: int
+    id: str = ""
+    source_path: str = ""
+    title: str = ""
+    author: str = ""
+    subject: str = ""
+    total_pages: int = 0
     toc: list[TocEntry] = field(default_factory=list)
     chapters: list[Chapter] = field(default_factory=list)
     summary: Optional[str] = None  # Résumé (produit par étape suivante du pipeline)

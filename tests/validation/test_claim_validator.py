@@ -59,6 +59,7 @@ def build_locators():
         source_type=SourceType.PDF,
         title="Dumas.pdf",
         path="data/dumas.pdf",
+        id="doc:dumas001",
         page_count=3,
         sections=[
             Section(
@@ -76,6 +77,7 @@ def build_locators():
     webpage = SourceLocator(
         source_type=SourceType.HTML,
         title="Example",
+        id="doc:webpage1",
         path="https://example.org",
         page_count=1,
         # default: one global section (section_index=0) with one page (page_index=0)
@@ -184,6 +186,7 @@ class SourceValidatorTestCase(unittest.TestCase):
         sparse = SourceLocator(
             source_type=SourceType.PDF,
             title="Sparse",
+            id="doc:sparse01",
             page_count=300,
             sections=[Section(section_index=0, pages=[Page(page_index=0)])],
         )
@@ -202,10 +205,10 @@ class SourceValidatorTestCase(unittest.TestCase):
     def test_sparse_locator_with_uncollected_default_indices(self):
         # 300-page book, only chapter 3 parsed: sections [2], pages [14, 16].
         partial = SourceLocator(
-            source_type=SourceType.PDF,
-            title="Dumas.pdf",
-            path="data/dumas.pdf",
-            page_count=300,
+            source_type=SourceType.PDF,                title="Dumas.pdf",
+                path="data/dumas.pdf",
+                id="doc:partial1",
+                page_count=300,
             sections=[
                 Section(
                     section_index=2,
@@ -242,6 +245,7 @@ class SourceValidatorTestCase(unittest.TestCase):
         partial = SourceLocator(
             source_type=SourceType.PDF,
             title="Partial.pdf",
+            id="doc:partial2",
             page_count=300,
             sections=[
                 Section(section_index=2, pages=[Page(page_index=14), Page(page_index=16)]),

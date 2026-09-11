@@ -43,9 +43,10 @@ from src.indexing import (
     OllamaEmbeddingClient,
     VectorChunk,
     build_source_chunks,
-    doc_id_from_source_path,
+    doc_id_of,
     get_embedding_client,
 )
+from src.extraction.ids import assign_extract_ids
 from src.indexing.chunks import build_knowledge_chunks
 from src.indexing.protocols import (
     EmbeddingClientProtocol,
@@ -115,7 +116,7 @@ def _doc(**overrides) -> DocumentExtract:
     )
     for key, value in overrides.items():
         setattr(doc, key, value)
-    return doc
+    return assign_extract_ids(doc)
 
 
 class _StubEmbedder:
@@ -150,11 +151,17 @@ class SourceChunksTest(unittest.TestCase):
             sum(1 for c in chunks if c.metadata["level"] == LEVEL_BLOCK), 4)
         self.assertEqual(len(chunks), 4 + 3 + 3 + 2 + 1)
 
-    def test_ids_are_deterministic(self):
-        self.assertEqual(build_source_chunks(_doc()), build_source_chunks(_doc()))
-        ids = [c.id for c in build_source_chunks(_doc())]
+    def test_ids_are_deterministic_and_use_unified_scheme(self):
+        doc = _doc()
+        self.assertEqual(build_source_chunks(doc), build_source_chunks(_doc()))
+        ids = [c.id for c in build_source_chunks(doc)]
         self.assertEqual(len(ids), len(set(ids)), "chunk ids must be unique")
-        self.assertTrue(all(i.startswith("Gazette::") for i in ids))
+        self.assertTrue(all(i.startswith(doc.id + "::") for i in ids),
+                        "chunk ids must chain from the document's unified id")
+        # Flat per-parent element ids chained hierarchically:
+        self.assertIn(f"{doc.id}::chp:1::pg:1::sec:1::txt:1", ids)
+        self.assertIn(f"{doc.id}::sum", ids)
+        self.assertIn(f"{doc.id}::chp:1::sum", ids)
 
     def test_block_summary_is_not_indexed(self):
         chunks = build_source_chunks(_doc())
@@ -183,16 +190,15 @@ class SourceChunksTest(unittest.TestCase):
             for value in chunk.metadata.values():
                 self.assertIsInstance(value, (str, int, float, bool))
 
-    def test_no_id_source_raises(self):
-        doc = _doc(source_path="", title="")
+    def test_unassigned_document_id_raises(self):
+        doc = _doc()
+        doc.id = ""  # indexing must refuse to invent an identity
         with self.assertRaises(ValueError):
             build_source_chunks(doc)
 
-    def test_doc_id_from_source_path(self):
-        self.assertEqual(
-            doc_id_from_source_path("data/sources/pdf/Dark Earth - Gazette #1.pdf"),
-            "Dark Earth - Gazette #1",
-        )
+    def test_doc_id_of_returns_model_id(self):
+        doc = _doc()
+        self.assertEqual(doc_id_of(doc), doc.id)
 
     def test_knowledge_chunks_stub(self):
         with self.assertRaises(NotImplementedError):
