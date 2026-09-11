@@ -15,7 +15,10 @@ front-end uses it for its interface (sidebar title, suggested replies…).
   not) — they come first in the task text and win over everything here.
 - Write in the language the task asks for; when the task says "the
   chat's primary language", match the language of the conversation
-  content embedded in the task text.
+  content embedded in the task text. When the task specifies no language
+  at all, reply in the dominant language of that embedded content — and
+  default to English only when the content itself is multilingual or too
+  short to tell.
 - The answer is consumed by a program: plain text only, no markdown
   fences, no preamble like "Here is the title:".
 

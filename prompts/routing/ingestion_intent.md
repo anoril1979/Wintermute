@@ -50,6 +50,8 @@ Respond with a single JSON object, no prose, no markdown fences:
   plain re-ingest (`force: false`) — the system decides from its own state
   whether the summaries need re-running.
 - `reason` is a short (one sentence) explanation of your classification.
+- `question` (when you ask the user something): write it in the user's
+  language — the utterance's language is the reliable default.
 
 ## Examples
 

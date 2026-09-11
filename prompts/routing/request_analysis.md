@@ -57,6 +57,9 @@ Respond with a single JSON object, no prose, no markdown fences:
   with `document: null`.
 - `question` (retrieval only): the question to answer, rephrased
   self-contained when the prompt split it across clauses; `null` otherwise.
+  Keep the user's language: the rephrased question is answered as-is by the
+  retrieval side, and the user expects the answer in the language they
+  asked in (a French question stays French, even if the sources are not).
 - `options.force_reingest` (ingestion only): `true` when the user asks to
   rework an already-processed document ("force extraction", "reingest",
   "re-extract", "re-index", "extract again", "the document changed"...).
