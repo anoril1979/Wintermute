@@ -32,7 +32,10 @@ def _initialiser_chaine() -> bool:
     global _rag_chain
 
     if not os.path.exists(DB_PATH):
-        logger.error(f"Base de données introuvable dans '{DB_PATH}'. Lancez ingest.py d'abord.")
+        logger.error(
+            f"Base de données introuvable dans '{DB_PATH}' — "
+            "retrieval stays dormant until an ingestion is completed."
+        )
         return False
 
     try:
@@ -75,10 +78,14 @@ def answer(question: str) -> str:
     if _rag_chain is None:
         success = _initialiser_chaine()
         if not success:
+            logger.warning(
+                "RAG chain dormant (no ChromaDB or Ollama down); answering in-band."
+            )
             return (
-                "⚠️ Le système RAG n'est pas disponible. "
-                "Vérifiez que ChromaDB est initialisé (lancez ingest.py) "
-                "et qu'Ollama est actif."
+                "⚠️ My retrieval memory is dormant: no document base is loaded "
+                "right now. I can still talk, but for questions about your "
+                "documents, an ingestion must be completed first — ask me to "
+                "ingest one and try again afterwards."
             )
 
     try:
@@ -106,5 +113,5 @@ def answer(question: str) -> str:
         logger.error(f"Erreur lors de la requête RAG : {e}")
         return (
             f"⚠️ Une erreur est survenue lors du traitement de ta question : {e}\n"
-            "Vérifiez qu'Ollama est actif (`ollama serve`)."
+            "Vérifiez qu'Ollama est actif (`ollama serve`), puis réessaie."
         )

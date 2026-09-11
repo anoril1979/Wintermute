@@ -16,7 +16,7 @@ The prototype (proto/app/api.py, "dark-earth-rag") answered a single
 question and streamed nothing. This version keeps the contract and adds:
 real streaming (SSE for OpenAI clients, ndjson for Ollama ones), a
 graceful degradation mode when the RAG stack or ChromaDB is not up
-(clear 503s instead of warning strings riding in the answer), model
+(clear 5xx-free answers instead of warning strings riding in the answer), model
 metadata wired to config/llm.yaml, rough token accounting, and an
 Ollama-native /api/chat so Ollama-protocol clients connect unchanged.
 
@@ -37,7 +37,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator, Iterator, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -52,8 +52,8 @@ configure_logging()
 
 # ---------------------------------------------------------------------------
 # The brain we proxy — imported defensively so the API can still start
-# (and report a clean 503) if the RAG stack itself is broken. Wintermute
-# survives the destruction of its components; so should the gateway.
+# even if the RAG stack itself is broken. Wintermute survives the
+# destruction of its components; so should the gateway.
 # ---------------------------------------------------------------------------
 try:
     from src.retrieval.rag import answer as _rag_answer
@@ -61,7 +61,7 @@ try:
 except Exception:  # pragma: no cover — broken RAG stack must not kill the API
     _rag_answer = None
     _initialiser_chaine = None
-    logger.exception("RAG stack unavailable at import; endpoints will report 503.")
+    logger.exception("RAG stack unavailable at import; the fallback answers in-band.")
 
 # Identity, wired to the project config where it matters. The prototype was
 # "dark-earth-rag"; the system grew, and something behind the wall of ice
@@ -173,17 +173,19 @@ async def log_requests(request: Request, call_next):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _require_brain() -> None:
-    """503 when the RAG stack is not importable at all."""
-    if _rag_answer is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Wintermute is unreachable: the RAG stack failed to load. "
-                "Check that Ollama is running (`ollama serve`) and dependencies "
-                "are installed."
-            ),
-        )
+def _brain_unavailable_text() -> str:
+    """Honest in-band answer when the legacy RAG stack is not importable.
+
+    Same spirit as fix B: a chat client treats an HTTP 503 as *its own*
+    failure and silently retries the whole conversation — the very loop
+    that made Wintermute re-run routing under the hood. An in-band text is
+    final; the client has nothing to retry.
+    """
+    return (
+        "My retrieval memory is unavailable right now: the RAG stack failed "
+        "to load. Check that Ollama is running (`ollama serve`) and that the "
+        "dependencies are installed, then try again."
+    )
 
 
 def _extract_question(messages: List[Message]) -> str:
@@ -200,15 +202,21 @@ def _extract_question(messages: List[Message]) -> str:
 
 
 def _ask(question: str) -> str:
-    """Call the RAG brain, mapping a silent failure to a clean 503."""
+    """Call the RAG brain — failures become honest in-band answers.
+
+    The chain itself already degrades gracefully (it answers a warning
+    text when ChromaDB is missing or Ollama is down); only an unexpected
+    exception lands here, and it must not become an HTTP 503: chat clients
+    auto-retry those and silently re-send the whole conversation.
+    """
     try:
         return _rag_answer(question)
-    except Exception as exc:  # pragma: no cover — depends on live Ollama
+    except Exception:
         logger.exception("The RAG chain failed while answering.")
-        raise HTTPException(
-            status_code=503,
-            detail=f"RAG failure: {exc}. Is Ollama running (`ollama serve`)?",
-        ) from exc
+        return (
+            "My retrieval memory hit an error while answering. Check that "
+            "Ollama is running (`ollama serve`), then try your question again."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -311,12 +319,12 @@ def _route_or_answer(question: str, *, on_event=None) -> tuple:
     the routing actually runs — used by the streaming endpoints to push
     them onto the thinking channel.
 
-    Returns ``(answer_text, routing_results_or_None)``. An unanalyzable
-    prompt (LLM down / unusable answer / configuration problem) produces a
-    plain, honest answer text instead of an HTTP error: a 503 made chat
-    clients silently auto-retry the very same prompt (and re-run whatever
-    routing had already accepted), while the user only saw a failure.
-    The only remaining HTTPException path is the legacy RAG fallback.
+    Returns ``(answer_text, routing_results_or_None)``. Every failure —
+    unanalyzable prompt, broken routing layer, dormant or failing RAG
+    fallback — produces a plain, honest answer text instead of an HTTP
+    error: a 503 made chat clients silently auto-retry the very same
+    prompt (and re-run whatever routing had already accepted), while the
+    user only saw a failure.
     """
     try:
         from src.routing.routing_orchestrator import run_routing
@@ -333,9 +341,13 @@ def _route_or_answer(question: str, *, on_event=None) -> tuple:
 
     text, needs_rag = _compose_reply(routing.get("results", []))
     if needs_rag:
-        _require_brain()  # the RAG fallback needs the legacy stack
-        rag_answer = _ask(question)
-        text = "\n".join(part for part in (rag_answer, text) if part)
+        if _rag_answer is None:
+            # The legacy stack is not even importable: say so in-band (the
+            # 503 that used to be raised here restarted the client loop).
+            text = _brain_unavailable_text()
+        else:
+            rag_answer = _ask(question)
+            text = "\n".join(part for part in (rag_answer, text) if part)
     if not text:
         text = "I could not do anything with that request."
     return text, routing.get("results")
@@ -359,7 +371,7 @@ def _routing_stream(question: str):
 
     Yields ``("trace", text)`` items while the routing runs, then exactly
     one ``("final", answer_text, routing_results)`` item. Never raises:
-    HTTPException from the non-streaming path degrades to an in-stream
+    any exception from the non-streaming path degrades to an in-stream
     final answer (response headers are already sent at that point — a
     status change is impossible).
     """
@@ -372,8 +384,14 @@ def _routing_stream(question: str):
     def worker() -> None:
         try:
             outcome["result"] = _route_or_answer(question, on_event=observer)
-        except HTTPException as exc:
-            outcome["http_error"] = exc
+        except Exception:  # pragma: no cover — belt & braces: never break the stream
+            logger.exception("The answer pipeline failed; degrading to an in-stream error text.")
+            outcome["result"] = (
+                "Something went wrong on my side while handling your message. "
+                "Please try again — and if it persists, check the logs at "
+                "data/logs/wintermute.log.",
+                None,
+            )
         finally:
             events.put(None)  # sentinel: routing finished
 
@@ -392,11 +410,8 @@ def _routing_stream(question: str):
 
     thread.join()
 
-    if "http_error" in outcome:
-        yield ("final", f"Analysis failed: {outcome['http_error'].detail}", None)
-    else:
-        text, routing = outcome["result"]
-        yield ("final", text, routing)
+    text, routing = outcome["result"]
+    yield ("final", text, routing)
 
 
 def _rough_tokens(text: str) -> int:

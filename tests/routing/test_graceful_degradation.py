@@ -173,5 +173,59 @@ class FixBAnalysisErrorAnswerTest(unittest.TestCase):
         self.assertIn("could not analyze", final[0][1])
 
 
+class RagFallbackNeverRaisesTest(unittest.TestCase):
+    """The legacy RAG fallback (retrieval requests before RetrievalTaskAgent
+    exists) must also answer in-band instead of raising: any HTTPException
+    there restarted the chat-client retry loop (third incident)."""
+
+    def test_unimportable_rag_stack_answers_in_band(self):
+        with unittest.mock.patch.object(api, "_rag_answer", None):
+            text, results = api._route_or_answer("what is in the docs?")
+        self.assertIn("retrieval memory is unavailable", text)
+        self.assertTrue(results)  # the routing outcomes still flow back
+
+    def test_failing_rag_answer_answers_in_band(self):
+        with unittest.mock.patch.object(api, "_rag_answer", side_effect=RuntimeError("boom")):
+            text, results = api._route_or_answer("what is in the docs?")
+        self.assertIn("retrieval memory hit an error", text)
+        self.assertTrue(results)
+
+    def test_streaming_path_always_yields_a_final_answer(self):
+        """Even if the whole answer pipeline explodes inside the worker
+        thread, the stream ends with one final text — never an exception."""
+        with unittest.mock.patch.object(
+            api, "_route_or_answer", side_effect=RuntimeError("kaboom")
+        ):
+            items = list(api._routing_stream("anything"))
+        final = [item for item in items if item[0] == "final"]
+        self.assertEqual(len(final), 1)
+        self.assertIn("went wrong", final[0][1])
+
+
+class RagDormantMessageTest(unittest.TestCase):
+    """The dormant-chain answer must invite ingestion — not tell the user to
+    run ingest.py first (the self-locking loop: ingestion itself comes
+    through Wintermute)."""
+
+    def test_dormant_message_never_says_lancez_ingest(self):
+        import inspect
+
+        from src.retrieval import rag
+
+        source = inspect.getsource(rag)
+        self.assertNotIn("Lancez ingest.py", source)
+
+    def test_dormant_answer_invites_ingestion(self):
+        import unittest.mock
+
+        from src.retrieval import rag
+
+        with unittest.mock.patch.object(rag, "_rag_chain", None), \
+                unittest.mock.patch.object(rag, "_initialiser_chaine", return_value=False):
+            answer = rag.answer("qui est Jean?")
+        self.assertIn("dormant", answer)
+        self.assertIn("ingest", answer)
+
+
 if __name__ == "__main__":
     unittest.main()
