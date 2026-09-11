@@ -80,7 +80,7 @@ class ExtractionAgentTraceTest(unittest.TestCase):
         self.assertEqual(result.status.value, "ok")
         kinds = [t["kind"] for t in context.events]
         self.assertEqual(
-            kinds, ["extracting", "canonical_saved", "extracted"],
+            kinds, ["extracting", "origin_missing", "canonical_saved", "extracted"],
             f"unexpected trace sequence: {kinds}",
         )
         extracted = context.events[-1]
@@ -101,7 +101,7 @@ class ExtractionAgentTraceTest(unittest.TestCase):
 
         self.assertEqual(result.status.value, "ok")
         kinds = [t["kind"] for t in context.events]
-        self.assertEqual(kinds, ["checkpoint_hit", "resumed", "canonical_saved"])
+        self.assertEqual(kinds, ["checkpoint_hit", "resumed", "origin_missing", "canonical_saved"])
         self.assertEqual(context.events[0]["data"]["checkpoint"], "already_done")
 
     def test_forced_extraction_traces(self):
@@ -120,7 +120,7 @@ class ExtractionAgentTraceTest(unittest.TestCase):
         self.assertEqual(result.status.value, "ok")
         kinds = [t["kind"] for t in context.events]
         self.assertEqual(
-            kinds, ["extraction_forced", "extracting", "canonical_saved", "extracted"]
+            kinds, ["extraction_forced", "extracting", "origin_missing", "canonical_saved", "extracted"]
         )
 
     def test_failed_extraction_traces(self):

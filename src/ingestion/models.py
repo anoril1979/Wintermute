@@ -23,6 +23,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from src.extraction.models import DocumentOrigin
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +34,7 @@ class ClarificationKind(str, Enum):
     REQUEST_UNCLEAR = "request_unclear"      # not recognizable as an ingestion order
     DOCUMENT_NOT_FOUND = "document_not_found"
     STATE_CONFLICT = "state_conflict"        # stores disagree with the request
+    ORIGIN_REQUIRED = "origin_required"      # origin unknown and not confidently inferrable
 
 
 class _StrictModel(BaseModel):
@@ -60,9 +63,31 @@ class IngestionIntent(_StrictModel):
     document: Optional[str] = None
     force: bool = False
     redo_summaries: bool = False
+    origin: Optional[str] = None
     clarification: Optional[ClarificationKind] = None
     question: Optional[str] = None
     reason: str = ""
+
+    @field_validator("origin")
+    @classmethod
+    def _origin_is_known_kind(cls, value: Optional[str]) -> Optional[str]:
+        """The LLM may state an origin only among the three kinds.
+
+        Returns the canonical lowercase value ("canon" / "community" /
+        "rpg"); ``None`` means "the user did not state an origin" — the
+        router may then try a *confident filename inference* (its own
+        job, never the LLM's guess alone) or ask the user. An origin the
+        system does not know is a malformed answer, not a guess.
+        """
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if cleaned not in {o.value for o in DocumentOrigin}:
+            raise ValueError(
+                f"origin must be one of 'canon', 'community', 'rpg' "
+                f"(or null), got {value!r}"
+            )
+        return cleaned
 
     @field_validator("document")
     @classmethod
@@ -92,6 +117,7 @@ class IngestionIntent(_StrictModel):
             "document": self.document,
             "force": self.force,
             "redo_summaries": self.redo_summaries,
+            "origin": self.origin,
             "clarification": self.clarification.value if self.clarification else None,
             "question": self.question,
             "reason": self.reason,

@@ -65,6 +65,16 @@ class ExtractionValidationAgent:
             f"({document.total_pages} declared page(s))",
         )
 
+        # Governance check — origin must be present. The model defaults to
+        # canon, so the *field* is never empty; the point of this check is
+        # to make an UNVERIFIED default visible (the router should always
+        # provide document_origin in the metadata).
+        if not context.metadata.get("document_origin"):
+            context.emit(
+                "task", "origin_missing",
+                "document origin unknown at validation time (canon assumed "
+                "by default, unverified)",
+            )
         report = check_and_prune(document)
 
         # Warnings never stop the ingestion: trace each one (the thinking

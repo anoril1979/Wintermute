@@ -73,7 +73,7 @@ from src.helpers.document_extract_json_store import (
     save_extract,
 )
 from src.extraction.ids import assign_extract_ids
-from src.extraction.models import DocumentExtract
+from src.extraction.models import DocumentExtract, DocumentOrigin
 from src.extraction.mineru_pdf_extractor import MineruPDFExtractor
 from src.extraction.validation import (
     SEVERITY_WARNING,
@@ -226,6 +226,24 @@ class PDFExtractionAgent:
                 detail="extractor returned no document",
             )
 
+        # Document origin (governance metadata) — decided by the router
+        # BEFORE the graph runs; the agent only applies it. A missing value
+        # defaults to canon but is reported: an unverified origin must be
+        # visible (the extraction validator warns too).
+        origin_raw = context.metadata.get("document_origin")
+        if origin_raw is not None:
+            try:
+                document.origin = DocumentOrigin(str(origin_raw).strip().lower())
+            except ValueError:
+                context.emit("task", "origin_warning",
+                             f"unknown document origin {origin_raw!r}; "
+                             f"defaulting to '{document.origin.value}'")
+        else:
+            context.emit("task", "origin_missing",
+                         "no document origin provided; defaulting to "
+                         "'canon' (unverified)")
+        context.metadata["document_origin"] = document.origin.value
+
         # Unified ids (src/extraction/ids.py) — assigned before any
         # persistence so the canonical JSON carries them from birth. A
         # document with no derivable name is an input problem, not a
@@ -341,6 +359,19 @@ class PDFExtractionAgent:
             logger.warning("Unusable canonical extraction for '%s': %s", name, exc)
             return None
 
+        # Origin: an explicit request-level origin wins (the user may be
+        # correcting the record); otherwise the file's stored origin stands
+        # — it was decided at its extraction and persisted with it.
+        origin_raw = context.metadata.get("document_origin")
+        if origin_raw is not None:
+            try:
+                document.origin = DocumentOrigin(str(origin_raw).strip().lower())
+            except ValueError:
+                context.emit("task", "origin_warning",
+                             f"unknown document origin {origin_raw!r}; "
+                             f"keeping the stored '{document.origin.value}'")
+        context.metadata["document_origin"] = document.origin.value
+
         context.outputs[self._output_key] = document
         context.metadata.update(
             {
@@ -410,6 +441,22 @@ class PDFExtractionAgent:
                          f"resumed '{document.title}' from artifacts: "
                          f"{document.total_pages} page(s), no OCR re-run",
                          document=name, checkpoint=status, pages=document.total_pages)
+            # Origin: artifact rebuilds carry no stored origin — apply the
+            # request-level one, or default with a visible warning.
+            origin_raw = context.metadata.get("document_origin")
+            if origin_raw is not None:
+                try:
+                    document.origin = DocumentOrigin(str(origin_raw).strip().lower())
+                except ValueError:
+                    context.emit("task", "origin_warning",
+                                 f"unknown document origin {origin_raw!r}; "
+                                 f"defaulting to '{document.origin.value}'")
+            else:
+                context.emit("task", "origin_missing",
+                             "no document origin provided; defaulting to "
+                             "'canon' (unverified)")
+            context.metadata["document_origin"] = document.origin.value
+
             context.outputs[self._output_key] = document
             context.metadata.update(
                 {

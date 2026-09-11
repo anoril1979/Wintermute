@@ -34,6 +34,24 @@ class BlockType(str, Enum):
     FOOTER = "footer"
 
 
+class DocumentOrigin(str, Enum):
+    """Where a document comes from — decided BEFORE storage.
+
+    This is governance metadata: when a piece of information is retrieved,
+    its origin tells how much the system (and the user) may trust it and
+    how conflicts are arbitrated (canon beats community beats user-made).
+    It is decided at routing time (user-stated, or confidently inferred
+    from the filename — else the user is asked) and stamped on the
+    DocumentExtract by the extraction agent.
+
+    Values are lowercase strings in JSON stores and vector metadata.
+    """
+
+    CANON = "canon"          # official sources of the universe (books, RPG supplements...)
+    COMMUNITY = "community"  # fan-made content (may contradict canon)
+    RPG = "rpg"              # user-created/modified content (private sessions, homebrew)
+
+
 @dataclass
 class TocEntry:
     """Entrée du sommaire (Table of Contents)."""
@@ -131,6 +149,13 @@ class DocumentExtract:
     This is THE unified source id: the knowledge layer's SourceLocator.id,
     the vector chunk id prefix, and the stores' cross-reference. Empty until
     the extraction layer assigns it.
+
+    ``origin``: where the document comes from (``DocumentOrigin``) — canon,
+    community or rpg. Defaults to CANON; the ingestion router is
+    responsible for deciding it (user-stated or confident inference) BEFORE
+    the extraction, and the extraction agent stamps it here. Note the
+    default is a placeholder, not an authority: an unverified default is
+    reported as a warning by the extraction validation.
     """
     id: str = ""
     source_path: str = ""
@@ -138,6 +163,7 @@ class DocumentExtract:
     author: str = ""
     subject: str = ""
     total_pages: int = 0
+    origin: DocumentOrigin = DocumentOrigin.CANON
     toc: list[TocEntry] = field(default_factory=list)
     chapters: list[Chapter] = field(default_factory=list)
     summary: Optional[str] = None  # Résumé (produit par étape suivante du pipeline)

@@ -47,6 +47,7 @@ from src.extraction.models import (
     BlockType,
     Chapter,
     DocumentExtract,
+    DocumentOrigin,
     PageContent,
     Section,
     TextBlock,
@@ -147,6 +148,7 @@ def document_extract_to_json_dict(doc: DocumentExtract) -> Dict[str, Any]:
         "author": doc.author,
         "subject": doc.subject,
         "total_pages": doc.total_pages,
+        "origin": doc.origin.value,
         "toc": [_toc_entry_to_dict(t) for t in doc.toc],
         "chapters": [_chapter_to_dict(c) for c in doc.chapters],
         "summary": doc.summary,
@@ -319,6 +321,19 @@ def document_extract_from_json_dict(data: Any) -> DocumentExtract:
         for i, item in enumerate(_require_list(data.get("toc", []), "toc"))
     ]
     metadata = _require_mapping(data.get("metadata", {}), "metadata")
+    # Origin: tolerated absent (legacy files) — the model's canon default
+    # then applies; an unknown value is reported, not guessed.
+    origin_raw = data.get("origin")
+    if origin_raw is None:
+        origin = DocumentOrigin.CANON
+    else:
+        try:
+            origin = DocumentOrigin(_require_str(origin_raw, "root.origin"))
+        except ValueError as exc:
+            raise ExtractJsonError(
+                f"root.origin: unknown document origin {origin_raw!r} "
+                "(expected 'canon', 'community' or 'rpg')"
+            ) from exc
     return DocumentExtract(
         id=_require_str(data.get("id", ""), "root.id"),
         source_path=_require_str(data.get("source_path", ""), "source_path"),
@@ -326,6 +341,7 @@ def document_extract_from_json_dict(data: Any) -> DocumentExtract:
         author=_require_str(data.get("author", ""), "author"),
         subject=_require_str(data.get("subject", ""), "subject"),
         total_pages=_require_int(data.get("total_pages", 0), "total_pages"),
+        origin=origin,
         toc=toc,
         chapters=chapters,
         summary=_opt_str(data.get("summary"), "summary"),

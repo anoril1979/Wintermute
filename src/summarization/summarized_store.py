@@ -69,19 +69,22 @@ class SummarizedJsonError(ValueError):
 # ---------------------------------------------------------------------------
 
 def _strip_summaries(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursive removal of ``summary`` and ``id`` keys from a serialized document.
+    """Recursive removal of ``summary``/``id`` keys (and the root ``origin``)
+    from a serialized document.
 
     The fingerprint must describe the *content* only: identical content
     yields an identical fingerprint whether or not summaries were computed
     yet. ``id`` keys are stripped for the same reason — ids are identity,
-    not content, so assigning ids (new extraction, or a file touched before
-    the id scheme existed) must not invalidate already-computed summaries.
+    not content. The document's ``origin`` is governance, not content:
+    its staleness semantics are handled explicitly by the summarizer's
+    origin guard (a changed origin re-summarizes), so it is excluded here
+    to keep the fingerprint purely about content.
     """
 
     def clean(node: Any) -> Any:
         if isinstance(node, dict):
             return {k: clean(v) for k, v in node.items()
-                    if k not in ("summary", "id")}
+                    if k not in ("summary", "id", "origin")}
         if isinstance(node, list):
             return [clean(v) for v in node]
         return node

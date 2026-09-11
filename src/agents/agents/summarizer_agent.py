@@ -493,6 +493,22 @@ class SummarizerAgent(LLMRoleAgent):
                          current_fingerprint=current_fingerprint)
             return None
 
+        # Origin guard: summaries were computed under a governance decision.
+        # The current origin must match the stored one — a changed origin
+        # (e.g. "that gazette was actually my own RPG rework") changes how
+        # every summary must be trusted later, so the stored ones are stale
+        # even though the *content* is identical.
+        stored_origin = getattr(stored_document, "origin", None)
+        if stored_origin is not None and stored_origin != document.origin:
+            context.emit("task", "summarized_origin_stale",
+                         f"document origin changed ({stored_origin.value} -> "
+                         f"{document.origin.value}): stored summaries were "
+                         "computed under the previous origin; re-summarizing",
+                         document=name,
+                         stored_origin=stored_origin.value,
+                         current_origin=document.origin.value)
+            return None
+
         # Fingerprints match: apply the stored summaries in place.
         stored_units = list(self._iter_units(stored_document))
         current_units = list(self._iter_units(document))

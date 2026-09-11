@@ -156,6 +156,9 @@ def build_source_chunks(doc: DocumentExtract) -> list[VectorChunk]:
         "doc_title": doc.title,
         "source_path": doc.source_path,
         "total_pages": doc.total_pages,
+        # Governance metadata: retrieval uses this to weigh/trust results
+        # (canon vs community vs user-made) and to arbitrate conflicts.
+        "origin": doc.origin.value,
     }
 
     def element_meta(

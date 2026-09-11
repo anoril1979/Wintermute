@@ -119,7 +119,7 @@ class CanonicalSaveResumeTest(unittest.TestCase):
         self.assertEqual(result.payload["checkpoint"], "recorded")
         self.assertEqual(
             [t["kind"] for t in context.events],
-            ["extracting", "canonical_saved", "extracted"],
+            ["extracting", "origin_missing", "canonical_saved", "extracted"],
         )
 
     def test_resume_from_canonical_json_skips_extractor(self):
@@ -204,7 +204,7 @@ class CanonicalSaveResumeTest(unittest.TestCase):
         self.assertEqual(
             kinds,
             ["canonical_found", "resume_failed", "checkpoint_hit",
-             "resumed", "canonical_saved"],
+             "resumed", "origin_missing", "canonical_saved"],
         )
         self.assertEqual(result.payload["resume"], "mineru_artifacts")
         self.assertEqual(context.metadata["resume_source"], "mineru_artifacts")

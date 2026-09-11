@@ -251,6 +251,7 @@ def run_ingestion_file(
     graph: Optional[IngestionGraph] = None,
     force: bool = False,
     force_summarization: bool = False,
+    origin: Optional[str] = None,
     on_event: Optional["EventCallback"] = None,
 ) -> Dict[str, object]:
     """Direct-entry variant: ingest a file given by path, skipping request
@@ -263,6 +264,9 @@ def run_ingestion_file(
     document even if it is already recorded in the job file).
     ``force_summarization=True`` re-runs the LLM summaries (bypasses the
     summarization job file and the summarized store).
+    ``origin`` is the document origin ("canon" / "community" / "rpg") —
+    governance metadata decided before storage; ``None`` defaults to canon
+    (reported as unverified by the extraction validation).
     """
     # -- step 0: configuration gate (same contract as run_ingestion) ---------
     config_failure = _config_gate()
@@ -293,6 +297,10 @@ def run_ingestion_file(
     )
     context.metadata["force_extraction"] = bool(force)
     context.metadata["force_summarization"] = bool(force_summarization)
+    if origin is not None:
+        # The extraction agent validates the value; an invalid one is
+        # reported there (origin_warning) and defaults to canon.
+        context.metadata["document_origin"] = str(origin).strip().lower()
     graph = graph or IngestionGraph(agents=default_agents)
     outcome = graph.run(context)
 
@@ -339,12 +347,18 @@ def main(argv: Optional[list] = None) -> int:
         "--force-summarization", action="store_true",
         help="Force re-summarization (bypass the summarization checkpoints)",
     )
+    parser.add_argument(
+        "--origin", choices=["canon", "community", "rpg"], default=None,
+        help="Document origin: canon (official), community (fan-made) or "
+             "rpg (user-created). Default: canon (unverified).",
+    )
     args = parser.parse_args(argv)
 
     result = run_ingestion_file(
         args.input_file,
         force=args.force,
         force_summarization=args.force_summarization,
+        origin=args.origin,
     )
     if result["status"] == STATUS_CONFIG_ERROR:
         # Graceful, human-readable report instead of a traceback: the user

@@ -27,6 +27,7 @@ silent keyword rejection.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,6 +78,8 @@ class IngestionFacts:
     summarization_job: str = STATUS_NEW
     summarized_json: bool = False          # data/summarized/<stem>.json exists
     summaries_stale: Optional[bool] = None  # fingerprint match known (None: unknown)
+    stored_origin: Optional[str] = None    # origin recorded in the canonical JSON
+    origin_known: bool = False             # origin stated, stored or confidently inferred
 
     def summary(self) -> Dict[str, Any]:
         """Compact dict for payloads and traces."""
@@ -88,7 +91,63 @@ class IngestionFacts:
             "summarization_job": self.summarization_job,
             "summarized_json": self.summarized_json,
             "summaries_stale": self.summaries_stale,
+            "stored_origin": self.stored_origin,
+            "origin_known": self.origin_known,
         }
+
+
+# ---------------------------------------------------------------------------
+# Origin inference (deterministic, auditable — never the LLM's guess alone)
+# ---------------------------------------------------------------------------
+
+#: Filename markers per origin kind. Short tokens are matched on word
+#: boundaries; multi-word phrases as substrings. Conservative by design:
+#: an ambiguous filename (markers of several kinds, or none) means "ask
+#: the user", never "guess". Tune these lists as real corpus names show
+#: their conventions.
+_ORIGIN_MARKERS: Dict[str, List[str]] = {
+    "rpg": ["rpg", "jdr", "homebrew", "ma campagne", "my campaign",
+            "ma session", "my session"],
+    "canon": ["canon", "source book", "sourcebook", "rules source",
+              "core rulebook", "core book", "rulebook", "livre de base",
+              "livres de base", "manuel des joueurs", "official",
+              "officiel"],
+    "community": ["gazette", "fanzine", "zine", "fan-", " fan ", "fan_",
+                  "community", "magazine", "wiki", "forum", "blog"],
+}
+
+
+def infer_origin(file_name: str) -> Optional[str]:
+    """Infer a document origin from its file name — or refuse.
+
+    Returns the origin value ("canon" / "community" / "rpg") only when
+    the name unambiguously carries markers of exactly ONE kind; ``None``
+    when nothing matches or markers conflict ("canon gazette.pdf" is a
+    contradiction, not a guess). The caller asks the user on ``None``.
+    """
+    name = (file_name or "").lower()
+    # Filenames often use _ or - where prose uses spaces ("ma_campagne",
+    # "core-rulebook"): match against the normalized form too.
+    normalized = re.sub(r"[-_]+", " ", name)
+    candidates = (name, normalized)
+    matched: set = set()
+    for kind, markers in _ORIGIN_MARKERS.items():
+        for marker in markers:
+            if " " in marker or marker.endswith("-") or marker.endswith("_"):
+                if any(marker in candidate for candidate in candidates):
+                    matched.add(kind)
+                    break
+            else:
+                # Word-boundary match for short tokens ("rpg" must not
+                # match inside a longer word).
+                if any(re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])",
+                                 candidate)
+                       for candidate in candidates):
+                    matched.add(kind)
+                    break
+    if len(matched) == 1:
+        return matched.pop()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +159,7 @@ class RoutingDecision:
     """Outcome of the decision table."""
 
     status: str                            # proceed / needs_clarification / rejected
-    flags: Dict[str, bool] = field(default_factory=dict)
+    flags: Dict[str, Any] = field(default_factory=dict)  # bools + document_origin: str
     explanation: str = ""
     question: str = ""                     # clarification wording (LLM or fallback)
     suggestions: List[str] = field(default_factory=list)
@@ -138,7 +197,7 @@ def apply_decision_table(
       extraction is gone (user cleaned data/extracted by hand) → the
       summarization state is orphaned: clarify.
     """
-    flags: Dict[str, bool] = {
+    flags: Dict[str, Any] = {
         "force_extraction": bool(intent.force),
         "force_summarization": False,
     }
@@ -208,6 +267,39 @@ def apply_decision_table(
     ):
         flags["force_summarization"] = True
 
+    # -- document origin (decided BEFORE storage) ------------------------------
+    # Precedence: user-stated > already stored (re-ingestion keeps the
+    # origin decided at its first ingestion) > confident filename
+    # inference > ask the user. The LLM only echoes the user's words —
+    # inference is Python's job (deterministic, auditable).
+    if intent.origin is not None:
+        flags["document_origin"] = intent.origin
+        facts.origin_known = True
+    elif facts.stored_origin:
+        flags["document_origin"] = facts.stored_origin
+        facts.origin_known = True
+    else:
+        inferred = infer_origin(facts.file_name)
+        facts.origin_known = inferred is not None
+        if inferred is None:
+            return RoutingDecision(
+                status=ROUTER_NEEDS_CLARIFICATION,
+                clarification=ClarificationKind.ORIGIN_REQUIRED,
+                explanation=(
+                    f"the document origin of '{facts.file_name}' is unknown: "
+                    "the system must know whether it is canon (official "
+                    "sources), community (fan-made) or rpg (user-created) "
+                    "before storing its content"
+                ),
+                suggestions=[
+                    f"\"ingest {facts.file_name}, it is a canon document\"",
+                    f"\"ingest {facts.file_name}, it is a community document\"",
+                    f"\"ingest {facts.file_name}, it is an rpg document (my own content)\"",
+                    "or phrase it so the origin is stated",
+                ],
+            )
+        flags["document_origin"] = inferred
+
     return RoutingDecision(
         status=ROUTER_PROCEED,
         flags=flags,
@@ -263,6 +355,24 @@ def gather_facts(
             facts.summarization_job = SummarizationJobFile().status_of(file_name)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Summarization job lookup failed: %s", exc)
+
+        # Stored origin: the canonical JSON carries the governance decision
+        # made at the document's first ingestion. Re-ingestion keeps it —
+        # the user states an origin again only to CORRECT the record.
+        try:
+            from src.helpers.document_extract_json_store import (
+                canonical_path_for,
+                load_extract,
+            )
+
+            canonical_path = canonical_path_for(facts.source_path)
+            if canonical_path.exists():
+                stored = load_extract(canonical_path)
+                facts.stored_origin = (
+                    stored.origin.value if getattr(stored, "origin", None) else None
+                )
+        except Exception as exc:  # noqa: BLE001 — advisory fact only
+            logger.warning("Stored-origin lookup failed: %s", exc)
         try:
             from src.summarization.summarized_store import (
                 load_summarized,

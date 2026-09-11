@@ -47,7 +47,8 @@ def _facts(**overrides) -> IngestionFacts:
     base = dict(file_name="meow.pdf", found=True,
                 extraction_job="already_done", canonical_json=True,
                 summarization_job="already_done", summarized_json=True,
-                summaries_stale=False)
+                summaries_stale=False,
+                stored_origin="canon")  # an ingested document has a decided origin
     base.update(overrides)
     return IngestionFacts(**base)
 
@@ -222,7 +223,8 @@ class DecisionTableTest(unittest.TestCase):
         self.assertEqual(decision.status, ROUTER_PROCEED)
         self.assertEqual(
             decision.flags,
-            {"force_extraction": False, "force_summarization": False},
+            {"force_extraction": False, "force_summarization": False,
+             "document_origin": "canon"},
         )
 
     def test_force_implies_force_summarization(self):
@@ -289,14 +291,15 @@ class RouteFlowTest(unittest.TestCase):
 
     def test_proceed_path(self):
         router = _router_with_llm(
-            ['{"valid": true, "document": "meow.pdf"}']
+            ['{"valid": true, "document": "meow.pdf", "origin": "canon"}']
         )
         with _patch_fact_gathering():
             decision = router.route("ingest meow.pdf")
         self.assertEqual(decision.status, ROUTER_PROCEED)
         self.assertEqual(
             decision.flags,
-            {"force_extraction": False, "force_summarization": False},
+            {"force_extraction": False, "force_summarization": False,
+             "document_origin": "canon"},
         )
 
     def test_document_not_found_uses_llm_wording(self):
@@ -328,7 +331,7 @@ class RouteFlowTest(unittest.TestCase):
 
     def test_force_request_sets_both_flags(self):
         router = _router_with_llm(
-            ['{"valid": true, "document": "meow.pdf", "force": true}']
+            ['{"valid": true, "document": "meow.pdf", "force": true, "origin": "canon"}']
         )
         with _patch_fact_gathering():
             decision = router.route("re-ingest meow.pdf")

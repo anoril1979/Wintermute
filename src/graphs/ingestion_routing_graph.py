@@ -34,7 +34,7 @@ from src.ingestion.ingestion_router import (
     apply_decision_table,
     gather_facts,
 )
-from src.ingestion.models import IngestionIntent
+from src.ingestion.models import ClarificationKind, IngestionIntent
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,8 @@ class IngestionRoutingGraph:
         outcome.intent = intent
         emit("intent_identified",
              f"intent: valid={intent.valid}, document={intent.document!r}, "
-             f"force={intent.force}, redo_summaries={intent.redo_summaries}"
+             f"force={intent.force}, redo_summaries={intent.redo_summaries}, "
+             f"origin={intent.origin!r}"
              + ("" if llm_ok else " (keyword fallback, LLM unavailable)"),
              intent=intent.summary(), llm_used=llm_ok)
 
@@ -138,7 +139,8 @@ class IngestionRoutingGraph:
                 f"intent classified, state consistent; flags={decision.flags}"
             )
             emit("decision",
-                 f"proceed: flags={decision.flags}",
+                 f"proceed: flags={decision.flags} "
+                 f"(origin={decision.flags.get('document_origin')!r})",
                  flags=dict(decision.flags))
             outcome.status = ROUTER_PROCEED
             outcome.traces.append({"kind": "decision", "status": "proceed",
@@ -146,6 +148,13 @@ class IngestionRoutingGraph:
             return outcome
 
         # -- 4. clarification / rejection wording -------------------------------------
+        if decision.clarification == ClarificationKind.ORIGIN_REQUIRED:
+            # Visible decision point: the origin is governance metadata —
+            # the thinking panel shows WHY the user is being asked.
+            emit("origin_missing",
+                 f"document origin unknown for '{facts.file_name}': "
+                 "asking the user (canon / community / rpg)",
+                 file_name=facts.file_name)
         decision = self._router._word_clarification(
             request, facts, decision, llm_used=llm_ok
         )

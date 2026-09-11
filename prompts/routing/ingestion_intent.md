@@ -17,6 +17,7 @@ Respond with a single JSON object, no prose, no markdown fences:
   "document": "meow.pdf",
   "force": false,
   "redo_summaries": false,
+  "origin": null,
   "clarification": null,
   "question": null,
   "reason": "short explanation"
@@ -45,6 +46,17 @@ Respond with a single JSON object, no prose, no markdown fences:
   résumé"... It stays `false` when the user only asks to re-extract (the
   system knows summaries become obsolete after re-extraction — that is
   not your call).
+- `origin` echoes the document origin ONLY when the user states it:
+  `"canon"` (official sources of the universe — rulebooks, novels,
+  official publications), `"community"` (fan-made content: gazettes,
+  fanzines, wiki/forum material), `"rpg"` (user-created content:
+  homebrew, home campaigns, their own documents). Key phrases: "it is
+  canon", "official", "source book" → canon; "fan-made", "community",
+  "from the wiki" → community; "my own", "homebrew", "my
+  campaign/session", "I wrote it" → rpg. When the user does NOT state
+  the origin, set `origin: null` — NEVER guess it yourself: the system
+  decides whether it can infer it from the file name, and asks the user
+  otherwise.
 - There is no "skip the summaries" option: summaries follow the content.
   If the user asks to re-ingest "without summarization", classify it as a
   plain re-ingest (`force: false`) — the system decides from its own state
@@ -56,7 +68,13 @@ Respond with a single JSON object, no prose, no markdown fences:
 ## Examples
 
 Input: `"Please ingest the new 'meow.pdf'"`
-→ `{"valid": true, "document": "meow.pdf", "force": false, "redo_summaries": false, "clarification": null, "question": null, "reason": "first-time ingestion"}`
+→ `{"valid": true, "document": "meow.pdf", "force": false, "redo_summaries": false, "origin": null, "clarification": null, "question": null, "reason": "first-time ingestion"}`
+
+Input: `"Ingère le Gazette #3, c'est du fan-made"`
+→ `{"valid": true, "document": "Gazette #3.pdf", "force": false, "redo_summaries": false, "origin": "community", "clarification": null, "question": null, "reason": "ingestion with a user-stated community origin"}`
+
+Input: `"Add my homebrew 'Tour de mage.pdf' to the corpus"`
+→ `{"valid": true, "document": "Tour de mage.pdf", "force": false, "redo_summaries": false, "origin": "rpg", "clarification": null, "question": null, "reason": "user-created content: rpg origin stated"}`
 
 Input: `"I fixed meow.pdf, please reingest it"`
 → `{"valid": true, "document": "meow.pdf", "force": true, "redo_summaries": false, "clarification": null, "question": null, "reason": "re-ingest after a fix: redo the content"}`
