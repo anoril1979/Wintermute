@@ -438,6 +438,21 @@ class VectorConfigValidationTest(unittest.TestCase):
                 "collections": {"source_chunks": "same",
                                 "knowledge_chunks": "same"}}})
 
+    def test_valid_embedding_batch_size_roundtrip(self):
+        from src.tools.config_loader import validate_vector_config
+
+        config = {"vector_db": {**VALID_VECTOR, "embedding_batch_size": 16}}
+        self.assertIs(validate_vector_config(config), config)
+        self.assertEqual(config["vector_db"]["embedding_batch_size"], 16)
+
+    def test_embedding_batch_size_rejects_non_positive(self):
+        from src.tools.config_loader import validate_vector_config, VectorConfigError
+
+        for bad in (0, -4, 1.5, True, "32"):
+            with self.assertRaises(VectorConfigError, msg=repr(bad)):
+                validate_vector_config({"vector_db": {
+                    **VALID_VECTOR, "embedding_batch_size": bad}})
+
     def test_traversal_path_rejected(self):
         from src.tools.config_loader import validate_vector_config, VectorConfigError
 

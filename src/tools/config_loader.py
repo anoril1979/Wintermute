@@ -538,6 +538,8 @@ def validate_vector_config(config: object) -> dict:
     * the document is a mapping containing a ``vector_db`` mapping;
     * ``vector_db.path`` is a required, non-empty, usable (non-traversal)
       path reference — the embedded ChromaDB store's folder;
+    * ``vector_db.embedding_batch_size`` (optional tuning knob) is a
+      strictly positive int when present (texts per embedding HTTP call);
     * ``vector_db.collections`` is a required, non-empty mapping. The two
       collections the system knows are required (``source_chunks`` and
       ``knowledge_chunks``); any additional key is validated the same way
@@ -589,7 +591,15 @@ def validate_vector_config(config: object) -> dict:
             "utilisable (vide ou contient '..')."
         )
 
-    # -- collections -----------------------------------------------------------
+    # -- embedding batch size (optional tuning knob) ----------------------------
+    if "embedding_batch_size" in vector:
+        batch = vector["embedding_batch_size"]
+        if isinstance(batch, bool) or not isinstance(batch, int) or batch <= 0:
+            raise VectorConfigError(
+                f"{prefix} : 'vector_db.embedding_batch_size' doit être un "
+                f"entier strictement positif (valeur : {batch!r})."
+            )
+
     if "collections" not in vector:
         raise VectorConfigError(
             f"{prefix} : clé requise manquante 'vector_db.collections' "

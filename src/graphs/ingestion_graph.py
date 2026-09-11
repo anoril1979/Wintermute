@@ -77,8 +77,10 @@ class IngestionGraph:
         GraphStep(name="content_extraction", agent_key="content_extractor"),
         GraphStep(name="extraction_validation", agent_key="extraction_validator"),
         GraphStep(name="hierarchical_summarization", agent_key="summarizer"),
-        GraphStep(name="content_embedding", agent_key="embedder"),
-        GraphStep(name="content_storage", agent_key="storage"),
+        # First SOURCE COLLECTION node: chunking + embedding + vector storage
+        # of the document content (blocks + summaries) into source_chunks.
+        # (The former content_embedding / content_storage placeholder pair.)
+        GraphStep(name="source_indexing", agent_key="source_indexer"),
         GraphStep(name="knowledge_extraction", agent_key="knowledge_extractor"),
         GraphStep(name="knowledge_validation", agent_key="knowledge_validator"),
         GraphStep(name="check_and_merge", agent_key="check_and_merge"),

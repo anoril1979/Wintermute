@@ -22,6 +22,7 @@ data/logs/
 data/cache/
 data/summarized/
 data/extracted/
+data/vector/
 chroma_db/
 proto/
 

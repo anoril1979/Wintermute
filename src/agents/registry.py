@@ -12,6 +12,7 @@ from typing import Dict
 
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
+from src.agents.agents.source_indexing_agent import SourceIndexingAgent
 from src.agents.agents.summarizer_agent import SummarizerAgent
 from src.agents.protocols import IngestionAgent
 
@@ -26,4 +27,5 @@ def build_default_agents() -> Dict[str, IngestionAgent]:
         "content_extractor": PDFExtractionAgent(),
         "extraction_validator": ExtractionValidationAgent(),
         "summarizer": SummarizerAgent(),
+        "source_indexer": SourceIndexingAgent(),
     }

@@ -65,6 +65,20 @@ class StubExtractor(DocumentExtractor):
         return self.document
 
 
+class _StubSourceIndexer:
+    """Indexing double: OK without touching Ollama or ChromaDB."""
+
+    name = "source_indexer"
+
+    def run(self, context):
+        from src.agents.protocols import AgentResult
+
+        return AgentResult(agent_name=self.name, status=AgentStatus.OK)
+
+    def validate(self, context):
+        return None
+
+
 class RegistryTest(unittest.TestCase):
     def test_default_registry_has_content_extractor(self):
         registry = build_default_agents()
@@ -196,9 +210,9 @@ class OrchestratorPlugTest(unittest.TestCase):
 
     def test_run_ingestion_file_completes_extraction_step(self):
         """With the real registry shape (stubbed extractor), the graph runs
-        content_extraction, extraction_validation AND hierarchical_summarization
-        (all implemented), then stops at the not-yet-implemented
-        content_embedding step."""
+        content_extraction, extraction_validation, hierarchical_summarization
+        AND source_indexing (all implemented), then stops at the
+        not-yet-implemented knowledge_extraction step."""
         from src.ingestion.ingestion_orchestrator import run_ingestion_file
 
         stub = StubExtractor(document=make_document(self.pdf_path))
@@ -208,6 +222,9 @@ class OrchestratorPlugTest(unittest.TestCase):
             job_file=ExtractionJobFile(self.pdf_path.parent / "jobs.json"),
             canonical_dir=self.pdf_path.parent / "extracted",
         )
+        # Indexing would reach the real Ollama/ChromaDB: stub it here — this
+        # test pins the GRAPH wiring, not the agent internals.
+        registry["source_indexer"] = _StubSourceIndexer()
 
         result = run_ingestion_file(self.pdf_path, agents=registry)
 
@@ -215,10 +232,10 @@ class OrchestratorPlugTest(unittest.TestCase):
         self.assertEqual(
             result["completed_steps"],
             ["content_extraction", "extraction_validation",
-             "hierarchical_summarization"],
+             "hierarchical_summarization", "source_indexing"],
         )
-        self.assertEqual(result["not_implemented_steps"], ["content_embedding"])
-        self.assertEqual(result["failed_step"], "content_embedding")
+        self.assertEqual(result["not_implemented_steps"], ["knowledge_extraction"])
+        self.assertEqual(result["failed_step"], "knowledge_extraction")
 
     def test_content_free_extraction_is_rejected_by_validation(self):
         """An extraction with no content at all passes the structural gate

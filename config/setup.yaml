@@ -37,6 +37,11 @@ vector_db:
   # absolute paths are also accepted).
   path: "data/vector"
 
+ # Texts per embedding HTTP call (SourceIndexingAgent batching): one
+  # round-trip per batch. qwen3-embedding handles 32 comfortably on a
+  # workstation; lower it for low-VRAM machines.
+  embedding_batch_size: 32
+
   # The two collections:
   #   source_chunks    — chunks of the DocumentExtract true content (atomic
   #                      text blocks) plus every summarized level above them
