@@ -372,8 +372,12 @@ class RoutingGraphTest(unittest.TestCase):
         router = IngestionRouter()
         client = mock.MagicMock()
         client.complete.side_effect = answers
-        with mock.patch.object(router, "_llm", return_value=client):
-            return IngestionRoutingGraph(router=router)
+        # Plain attribute assignment, NOT mock.patch: the patch-context in an
+        # earlier version exited when this helper returned, silently reverting
+        # to the real LLM during graph.run() (live Ollama calls in tests).
+        # Instance attributes shadow the method for the object's lifetime.
+        router._llm = lambda: client
+        return IngestionRoutingGraph(router=router)
 
     @staticmethod
     def _collector():

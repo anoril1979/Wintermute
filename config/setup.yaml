@@ -15,7 +15,7 @@ ollama:
 
 logging:
   level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  format: "%(asctime)s - [%(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"
   # Durable log file (relative to the project root; "" disables file logging).
   file: "data/logs/wintermute.log"
   # Rotation of the log file: wintermute.log, then .log.1, .log.2, ...

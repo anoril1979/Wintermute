@@ -7,6 +7,9 @@ Covers:
 * Trace mirroring — every ``emit()`` on a graph context also reaches the
   ``wintermute.traces`` logger, so the "thinking" flow lands in the log
   file.
+* Correlation ids — one id per chat request stamped on every log line it
+  produces (endpoint propagation, streaming worker, unbound placeholder),
+  so multi-request sessions read as grouped blocks in the log file.
 """
 
 from __future__ import annotations
@@ -206,6 +209,117 @@ class TraceMirroringTest(_LoggingTestCase):
                 for r in capture.records),
             [r.getMessage() for r in capture.records],
         )
+
+
+class CorrelationIdTest(_LoggingTestCase):
+    """One id per chat request, on every line that request produces.
+
+    The end-to-end test drives the real endpoint through TestClient with
+    routing stubbed (hermetic) and reads the log FILE — the property the
+    feature exists for: a multi-request session must read as grouped
+    blocks in data/logs/wintermute.log.
+    """
+
+    def test_new_correlation_id_shape(self) -> None:
+        first = logging_setup.new_correlation_id()
+        second = logging_setup.new_correlation_id()
+        self.assertRegex(first, r"^[0-9a-f]{8}$")
+        self.assertNotEqual(first, second)
+
+    def test_bound_id_is_stamped_on_file_lines(self) -> None:
+        log_path = self._configure_with_file()
+        cid = logging_setup.new_correlation_id()
+        logging_setup.bind_correlation_id(cid)
+        try:
+            logging.getLogger("test.probe").info("grouped line")
+        finally:
+            logging_setup.bind_correlation_id(None)
+        self.assertIn(f"[{cid}]", log_path.read_text(encoding="utf-8"))
+        self.assertIn("grouped line", log_path.read_text(encoding="utf-8"))
+
+    def test_unbound_records_carry_the_placeholder(self) -> None:
+        log_path = self._configure_with_file()
+        logging.getLogger("test.probe").info("background line")
+        content = log_path.read_text(encoding="utf-8")
+        self.assertIn("[-]", content)  # placeholder, not a missing attribute
+        self.assertIn("background line", content)
+
+    def test_custom_format_without_placeholder_still_works(self) -> None:
+        # A setup.yaml format without %(correlation_id)s must not crash:
+        # the filter only stamps the attribute; the format decides.
+        self.config_mock.return_value = {
+            "logging": {
+                "level": "INFO",
+                "file": str(self.tmp / "custom.log"),
+                "format": "%(name)s: %(message)s",
+            }
+        }
+        configure_logging(force=True)
+        logging.getLogger("test.probe").info("old style")
+        content = (self.tmp / "custom.log").read_text(encoding="utf-8")
+        self.assertIn("test.probe: old style", content)
+
+    def test_streaming_worker_carries_the_cid(self) -> None:
+        # The stream worker is a manually spawned thread: threadpool
+        # inheritance does not apply, the id must be handed over.
+        import unittest.mock
+
+        import app.api as api
+        from src.logging_setup import current_correlation_id
+
+        seen = {}
+
+        def fake_routing(question, on_event=None):
+            seen["cid"] = current_correlation_id()
+            return {"status": "handled", "results": [], "traces": []}
+
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.run_routing", fake_routing
+        ):
+            items = list(api._routing_stream("hello", cid="feedface"))
+
+        self.assertEqual(seen["cid"], "feedface")
+        self.assertEqual(items[-1][0], "final")
+
+    def test_endpoint_lines_share_one_correlation_id(self) -> None:
+        # End to end: middleware mints the id, the sync endpoint's
+        # threadpool thread inherits it, every wintermute line of the
+        # request carries the SAME id in the log file.
+        import unittest.mock
+
+        from fastapi.testclient import TestClient
+
+        import app.api as api
+        from src.logging_setup import current_correlation_id
+
+        log_path = self._configure_with_file()
+
+        def fake_routing(question, on_event=None):
+            return {"status": "handled", "results": [], "traces": []}
+
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.run_routing", fake_routing
+        ):
+            client = TestClient(api.app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "Hello there"}]},
+            )
+        self.assertEqual(response.status_code, 200)
+        # No leak into the caller's context after the request.
+        self.assertIsNone(current_correlation_id())
+
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        request_lines = [
+            line for line in lines
+            if ">>> POST /v1/chat/completions" in line
+            or "Incoming chat:" in line
+            or "<<< 200 /v1/chat/completions" in line
+        ]
+        self.assertEqual(len(request_lines), 3, request_lines)
+        ids = {line.split("[")[1].split("]")[0] for line in request_lines}
+        self.assertEqual(len(ids), 1, request_lines)  # one group, one id
+        self.assertNotIn("-", ids)  # a real id, not the placeholder
 
 
 if __name__ == "__main__":

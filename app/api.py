@@ -46,7 +46,12 @@ logger = logging.getLogger("wintermute")
 # Central logging (console + data/logs/wintermute.log, per setup.yaml).
 # Called here so the durable log file exists whatever the entry point is;
 # idempotent, so the CLI entry points calling it again are no-ops.
-from src.logging_setup import configure_logging
+from src.llm.guard import META_SENTINEL, meta_answer, prompt_is_meta
+from src.logging_setup import (
+    bind_correlation_id,
+    configure_logging,
+    new_correlation_id,
+)
 
 configure_logging()
 
@@ -163,15 +168,46 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.info(">>> %s %s", request.method, request.url.path)
-    response = await call_next(request)
-    logger.info("<<< %s %s", response.status_code, request.url.path)
-    return response
+    """One correlation id per HTTP request, stamped on every log line it
+    produces — the >>>/<<< pair, the analyzer, the traces, the agents —
+    so a multi-request session reads as grouped blocks in the log file.
+
+    Binding is per-thread: the async middleware logs on the event-loop
+    thread (id bound here, released in ``finally`` — the loop is shared by
+    ALL requests, a leak would mislabel everything after), while the sync
+    endpoints bind the same id themselves from ``request.state`` on their
+    own threadpool threads (see ``_request_cid``).
+    """
+    cid = new_correlation_id()
+    request.state.correlation_id = cid
+    bind_correlation_id(cid)
+    try:
+        logger.info(">>> %s %s", request.method, request.url.path)
+        response = await call_next(request)
+        logger.info("<<< %s %s", response.status_code, request.url.path)
+        return response
+    finally:
+        bind_correlation_id(None)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _request_cid(request: Request) -> str:
+    """Bind and return this request's correlation id for the *current*
+    thread.
+
+    The id is minted once per HTTP request in the middleware (stored on
+    ``request.state``); sync endpoints run on threadpool threads — a
+    different thread than the middleware's — so each binds it to its own
+    thread's logging state before doing any work. Returns a fresh id when
+    called outside a request (direct calls, tests).
+    """
+    cid = getattr(request.state, "correlation_id", None) or new_correlation_id()
+    bind_correlation_id(cid)
+    return cid
+
 
 def _brain_unavailable_text() -> str:
     """Honest in-band answer when the legacy RAG stack is not importable.
@@ -188,17 +224,48 @@ def _brain_unavailable_text() -> str:
     )
 
 
+def _log_snippet(text: str, limit: int = 400) -> str:
+    """One-line, bounded text for log lines — fix C's observability rule:
+    log *what was actually received and analyzed*, so 'the client sent the
+    whole conversation' vs 'the model invented it' is provable from logs.
+    """
+    return " ".join(text.split())[:limit]
+
+
 def _extract_question(messages: List[Message]) -> str:
     """The user's latest utterance.
 
     TODO (memory): feed the full exchange to the assistant once the
     retrieval chain supports conversation state; for now, as in the
     prototype, only the last user message drives the answer.
+
+    Meta traffic (the sentinel, or Open WebUI's auxiliary tasks — title
+    generation, follow-up suggestions, topic tagging) is intercepted
+    here and never reaches routing: the fixed meta answer is returned,
+    empty text means "skip" for the endpoints.
     """
+    roles = ",".join(m.role for m in messages)
     for message in reversed(messages):
         if message.role == "user" and message.content.strip():
-            return message.content.strip()
-    return messages[-1].content.strip()
+            question = message.content.strip()
+            if prompt_is_meta(question):
+                logger.info(
+                    "Incoming chat: %d message(s) [%s]; "
+                    "meta/background prompt intercepted, no routing: %s",
+                    len(messages), roles, _log_snippet(question),
+                )
+                return META_SENTINEL
+            logger.info(
+                "Incoming chat: %d message(s) [%s]; analyzed text: %s",
+                len(messages), roles, _log_snippet(question),
+            )
+            return question
+    question = messages[-1].content.strip()
+    logger.info(
+        "Incoming chat: %d message(s) [%s]; analyzed text (fallback last): %s",
+        len(messages), roles, _log_snippet(question),
+    )
+    return question
 
 
 def _ask(question: str) -> str:
@@ -326,6 +393,10 @@ def _route_or_answer(question: str, *, on_event=None) -> tuple:
     prompt (and re-run whatever routing had already accepted), while the
     user only saw a failure.
     """
+    if question == META_SENTINEL or prompt_is_meta(question):
+        # Defense in depth: meta/background prompts never reach routing,
+        # whatever the entry point that produced the question text.
+        return meta_answer(), None
     try:
         from src.routing.routing_orchestrator import run_routing
 
@@ -362,12 +433,16 @@ import queue as _queue
 import threading as _threading
 
 
-def _routing_stream(question: str):
+def _routing_stream(question: str, *, cid: Optional[str] = None):
     """Yield routing traces live, then the final answer.
 
     The routing layer is synchronous and blocking; a worker thread runs it
     with a trace observer pushing into a queue, so the consumer (the
     streaming response generators) receives each trace as it happens.
+
+    ``cid`` re-binds the request's correlation id on the worker thread, so
+    the routing/traces/agent lines carry the same id as the endpoint's own
+    (thread-local logging state is not inherited across threads).
 
     Yields ``("trace", text)`` items while the routing runs, then exactly
     one ``("final", answer_text, routing_results)`` item. Never raises:
@@ -382,6 +457,7 @@ def _routing_stream(question: str):
         events.put(event)
 
     def worker() -> None:
+        bind_correlation_id(cid)  # same id as the endpoint thread
         try:
             outcome["result"] = _route_or_answer(question, on_event=observer)
         except Exception:  # pragma: no cover — belt & braces: never break the stream
@@ -521,7 +597,7 @@ def list_models():
 
 
 @app.post("/v1/chat/completions")
-def chat(request: ChatCompletionRequest):
+def chat(request: ChatCompletionRequest, http_request: Request) -> dict:
     """OpenAI-dialect chat. The message is routed first (ingestion orders
     are executed, retrieval questions fall through to the RAG chain), so
     the answer comes from what the user actually asked for.
@@ -531,7 +607,12 @@ def chat(request: ChatCompletionRequest):
     renders in its thinking panel), then the answer streams as
     ``delta.content`` (OpenAI-style SSE, ``data: [DONE]`` sentinel).
     """
+    cid = _request_cid(http_request)  # per-thread correlation id for every log line
     question = _extract_question(request.messages)
+    if question == META_SENTINEL:
+        # Meta/background prompt (front-end auxiliary task or probe):
+        # fixed answer, no analysis, no routing, no LLM call.
+        return _openai_completion(question, meta_answer(), request.model)
 
     if request.stream:
         def sse() -> Iterator[str]:
@@ -550,7 +631,7 @@ def chat(request: ChatCompletionRequest):
                     }
                 ) + "\n\n"
 
-            for item in _routing_stream(question):
+            for item in _routing_stream(question, cid=cid):
                 if item[0] == "trace":
                     yield chunk({"reasoning_content": item[1]})
                 else:
@@ -602,20 +683,35 @@ def api_tags():
 
 
 @app.post("/api/chat")
-def ollama_chat(request: OllamaChatRequest):
+def ollama_chat(request: OllamaChatRequest, http_request: Request) -> dict:
     """Ollama-dialect chat (routed, like ``/v1/chat/completions``).
 
     ``stream=true`` (the Ollama default) yields ndjson lines: routing
     traces stream live as ``message.thinking`` chunks (Ollama's reasoning
     field, rendered in Open WebUI's thinking panel), then the answer as
     ``message.content`` chunks, ending with ``done: true``."""
+    cid = _request_cid(http_request)  # per-thread correlation id for every log line
     question = _extract_question(request.messages)
 
     created_at = datetime.now(timezone.utc).isoformat()
 
+    if question == META_SENTINEL:
+        # Meta/background prompt (front-end auxiliary task or probe):
+        # fixed answer, no analysis, no routing, no LLM call.
+        return {
+            "model": request.model,
+            "created_at": created_at,
+            "message": {"role": "assistant", "content": meta_answer()},
+            "done": True,
+            "done_reason": "stop",
+            "total_duration": 0,
+            "prompt_eval_count": _rough_tokens(question),
+            "eval_count": _rough_tokens(meta_answer()),
+        }
+
     if request.stream:
         def ndjson() -> Iterator[str]:
-            for item in _routing_stream(question):
+            for item in _routing_stream(question, cid=cid):
                 if item[0] == "trace":
                     yield _json_dumps(
                         {

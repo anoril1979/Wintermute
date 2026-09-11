@@ -262,10 +262,16 @@ class StreamingWireTest(unittest.TestCase):
 
     def test_non_streaming_has_no_thinking_field(self):
         routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer([_general()])
-        response = self.client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "hello"}]},
-        )
+        # Hermetic: a stub agent answers the general request (the default
+        # registry would build the real GeneralTaskAgent → live Ollama).
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.build_default_task_agents",
+            return_value={"general_task": OkAgent()},
+        ):
+            response = self.client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hello"}]},
+            )
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("reasoning_content", response.text)
 

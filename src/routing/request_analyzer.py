@@ -18,11 +18,22 @@ from pathlib import Path
 from typing import Optional
 
 from src.routing.models import AnalysisResult, parse_analysis
+from src.llm.guard import prompt_is_meta
 
 logger = logging.getLogger(__name__)
 
 #: Where the analysis prompt lives (loaded lazily, once).
 ANALYSIS_PROMPT_PATH = Path("prompts/routing/request_analysis.md")
+
+
+# Bound for logged prompt/answer snippets — long enough to diagnose,
+# short enough to keep one log line one line.
+_LOG_SNIPPET_LIMIT = 500
+
+
+def _log_snippet(text: str) -> str:
+    """Flattened, bounded text for log lines (fix C observability)."""
+    return " ".join(text.split())[:_LOG_SNIPPET_LIMIT]
 
 
 class RequestAnalysisError(Exception):
@@ -84,7 +95,18 @@ class RequestAnalyzer:
             # Nothing to analyze: an empty batch, not an error.
             return AnalysisResult(requests=[])
 
+        if prompt_is_meta(user_prompt):
+            # Front-end auxiliary task (title/tags/follow-ups) that slipped
+            # past the API guard: refuse it here rather than produce a
+            # garbage analysis — last line of defense.
+            logger.warning("Meta/background prompt refused at the analyzer boundary.")
+            return AnalysisResult(requests=[])
+
         prompt = self._build_prompt(user_prompt)
+        logger.info(
+            "Analyzing prompt (%d chars): %s",
+            len(user_prompt), _log_snippet(user_prompt),
+        )
 
         try:
             # No explicit budget: the generation ceiling is the role's
@@ -97,6 +119,10 @@ class RequestAnalyzer:
                 f"request analysis failed: the LLM could not be reached ({exc})",
                 cause="llm_request",
             ) from exc
+
+        logger.info(
+            "Analyzer raw answer (%d chars): %s", len(raw), _log_snippet(raw)
+        )
 
         try:
             result = parse_analysis(raw)

@@ -8,6 +8,9 @@ that into a question for the user.
 Fix B — an unanalyzable prompt produces an honest answer text instead of an
 HTTPException(503), which chat clients treated as a retryable failure and
 silently re-sent (re-running accepted routing under the hood).
+
+Meta-prompt guard — front-end auxiliary traffic (title/tags/follow-ups)
+is answered in place, never routed (see ``src/llm/guard.py``).
 """
 
 from __future__ import annotations
@@ -15,11 +18,15 @@ from __future__ import annotations
 import unittest
 import unittest.mock
 
+from fastapi.testclient import TestClient
+
 import app.api as api
+from src.llm import guard
 from src.graphs.routing_graph import (
     STATUS_INCOMPLETE,
     RoutingGraph,
 )
+from src.routing.request_analyzer import RequestAnalyzer
 from src.agents.contexts import RoutingContext
 from src.routing.models import AnalysisResult, RequestKind, UserRequest, parse_analysis
 
@@ -176,16 +183,37 @@ class FixBAnalysisErrorAnswerTest(unittest.TestCase):
 class RagFallbackNeverRaisesTest(unittest.TestCase):
     """The legacy RAG fallback (retrieval requests before RetrievalTaskAgent
     exists) must also answer in-band instead of raising: any HTTPException
-    there restarted the chat-client retry loop (third incident)."""
+    there restarted the chat-client retry loop (third incident).
+
+    ``run_routing`` is stubbed: these tests exercise the API's fallback
+    branch, not the routing layer (covered elsewhere, hermetically).
+    """
+
+    def _routed_retrieval(self):
+        return {
+            "status": "handled",
+            "results": [{
+                "kind": "retrieval", "utterance": "what is in the docs?",
+                "status": "not_implemented",
+                "detail": "no agent implemented for kind 'retrieval' yet",
+            }],
+            "traces": [],
+        }
 
     def test_unimportable_rag_stack_answers_in_band(self):
-        with unittest.mock.patch.object(api, "_rag_answer", None):
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.run_routing",
+            return_value=self._routed_retrieval(),
+        ), unittest.mock.patch.object(api, "_rag_answer", None):
             text, results = api._route_or_answer("what is in the docs?")
         self.assertIn("retrieval memory is unavailable", text)
         self.assertTrue(results)  # the routing outcomes still flow back
 
     def test_failing_rag_answer_answers_in_band(self):
-        with unittest.mock.patch.object(api, "_rag_answer", side_effect=RuntimeError("boom")):
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.run_routing",
+            return_value=self._routed_retrieval(),
+        ), unittest.mock.patch.object(api, "_rag_answer", side_effect=RuntimeError("boom")):
             text, results = api._route_or_answer("what is in the docs?")
         self.assertIn("retrieval memory hit an error", text)
         self.assertTrue(results)
@@ -225,6 +253,153 @@ class RagDormantMessageTest(unittest.TestCase):
             answer = rag.answer("qui est Jean?")
         self.assertIn("dormant", answer)
         self.assertIn("ingest", answer)
+
+
+class FixCObservabilityTest(unittest.TestCase):
+    """Fix C: what the API received and what the analyzer answered must be
+    provable from the log file alone (which client sent the conversation,
+    whether the model invented content, why an analysis split a prompt)."""
+
+    def test_extract_question_logs_shape_and_text(self):
+        messages = [
+            api.Message(role="user", content="Hello"),
+            api.Message(role="assistant", content="Hi."),
+            api.Message(role="user", content="  Ingest meow.pdf, please.  "),
+        ]
+        with self.assertLogs("wintermute", level="INFO") as captured:
+            question = api._extract_question(messages)
+        self.assertEqual(question, "Ingest meow.pdf, please.")
+        line = " ".join(captured.output)
+        self.assertIn("3 message(s) [user,assistant,user]", line)
+        self.assertIn("Ingest meow.pdf, please.", line)
+
+    def test_log_snippet_is_bounded_and_flattened(self):
+        text = "line1\n\n  line2\tline3"
+        snippet = api._log_snippet(text + "x" * 1000)
+        self.assertTrue(snippet.startswith("line1 line2 line3"))
+        self.assertLessEqual(len(snippet), 400)
+
+    def test_analyzer_logs_input_and_raw_answer(self):
+        analyzer = RequestAnalyzer()
+        fake = unittest.mock.Mock()
+        fake.complete.return_value = (
+            '{"requests": [{"kind": "general", "utterance": "Hi",'
+            ' "document": null, "question": null,'
+            ' "options": {"force_reingest": false, "section_scope": null}}]}'
+        )
+        with unittest.mock.patch.object(analyzer, "_llm", return_value=fake), \
+                self.assertLogs("src.routing.request_analyzer", level="INFO") as captured:
+            analyzer.analyze("What is the color of the sky?")
+        line = " ".join(captured.output)
+        self.assertIn("Analyzing prompt (29 chars): What is the color of the sky?", line)
+        self.assertIn("Analyzer raw answer", line)
+        self.assertIn('"kind": "general"', line)
+
+
+class MetaPromptGuardTest(unittest.TestCase):
+    """The meta-prompt guard: front-end auxiliary traffic (Open WebUI's
+    title generation, follow-up suggestions, topic tagging) must never
+    reach the analyzer or the routing graph — fix C's logs proved those
+    prompts each triggered a full routing run whose answer the front-end
+    threw away. An explicit sentinel also lets a client probe the
+    endpoint without paying for a routing run."""
+
+    # --- the classifier -------------------------------------------------
+
+    def test_openwebui_title_prompt_is_meta(self):
+        # Verbatim shape from the fix C log session.
+        self.assertTrue(guard.prompt_is_meta(
+            "### Task: Generate a concise, 3-5 word title with an emoji "
+            "summarizing the chat history."
+        ))
+
+    def test_openwebui_followup_prompt_is_meta(self):
+        self.assertTrue(guard.prompt_is_meta(
+            "### Task: Suggest 3-5 relevant follow-up questions or prompts "
+            "that the user might naturally ask next in this conversation."
+        ))
+
+    def test_openwebui_tagging_prompt_is_meta(self):
+        self.assertTrue(guard.prompt_is_meta(
+            "### Task: Generate 1-3 broad tags categorizing the main themes "
+            "of the chat history."
+        ))
+
+    def test_sentinel_is_meta(self):
+        self.assertTrue(guard.prompt_is_meta(guard.META_SENTINEL))
+
+    def test_real_user_prompts_are_not_meta(self):
+        self.assertFalse(guard.prompt_is_meta(
+            "OK… Errr, another roll, good? Well, I would like you to ingest "
+            "some documents, then provide me with the summary of it."
+        ))
+        self.assertFalse(guard.prompt_is_meta("Ingest meow.pdf, please."))
+        self.assertFalse(guard.prompt_is_meta("Hi!"))
+
+    def test_meta_wording_inside_a_real_message_is_not_enough(self):
+        # The match anchors on the opening instruction: a user *quoting*
+        # a title task mid-message must still be routed.
+        self.assertFalse(guard.prompt_is_meta(
+            "Wintermute, when I say '### Task: Generate a title' I mean "
+            "the front-end is talking, not me."
+        ))
+
+    # --- the analyzer boundary -------------------------------------------
+
+    def test_analyzer_refuses_meta_prompt_without_llm_call(self):
+        analyzer = RequestAnalyzer()
+        with unittest.mock.patch.object(analyzer, "_llm") as llm_factory:
+            result = analyzer.analyze(
+                "### Task: Generate a concise title for the chat history."
+            )
+        self.assertEqual(result.requests, [])
+        llm_factory.assert_not_called()  # not even constructed
+
+    def test_analyzer_still_accepts_normal_prompts(self):
+        analyzer = RequestAnalyzer()
+        fake = unittest.mock.Mock()
+        fake.complete.return_value = (
+            '{"requests": [{"kind": "general", "utterance": "Hi",'
+            ' "document": null, "question": null,'
+            ' "options": {"force_reingest": false, "section_scope": null}}]}'
+        )
+        with unittest.mock.patch.object(analyzer, "_llm", return_value=fake):
+            result = analyzer.analyze("Hello there!")
+        self.assertEqual(len(result.requests), 1)
+
+    # --- the API boundary -------------------------------------------------
+
+    def test_api_meta_answer(self):
+        text = guard.meta_answer()
+        self.assertIn("background", text)
+        self.assertIn("no routing was performed", text)
+
+    def test_api_meta_short_circuit_never_reaches_routing(self):
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.run_routing"
+        ) as run_routing:
+            answer, _ = api._route_or_answer(guard.META_SENTINEL)
+        run_routing.assert_not_called()
+        self.assertIn("background", answer)
+
+    def test_openai_endpoint_answers_meta_prompt_without_routing(self):
+        client = TestClient(api.app)
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.run_routing"
+        ) as run_routing:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{
+                        "role": "user",
+                        "content": "### Task: Generate a concise title with an emoji.",
+                    }],
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        run_routing.assert_not_called()
+        content = response.json()["choices"][0]["message"]["content"]
+        self.assertIn("background", content)
 
 
 if __name__ == "__main__":
