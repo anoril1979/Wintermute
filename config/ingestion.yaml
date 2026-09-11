@@ -1,0 +1,86 @@
+# ============================================================
+# ingestion.yaml — Ingestion configuration
+# 1. Documents root and extension routing: the ingest tool
+#    resolves documents inside the documents root, in the
+#    subfolder mapped to the file's extension. Subfolders are
+#    created on demand when a file is found to belong to a
+#    folder that does not exist yet.
+# 2. Extraction output: where the MinerU PDF extractor writes
+#    its artifacts and how its JSON output file is named.
+# 3. Summarization: LLM summaries persistence + size settings.
+# ============================================================
+
+# Root folder where ingestable documents live (relative to the
+# project root; absolute paths are also accepted).
+documents_root: "data/sources"
+
+# Extension -> subfolder mapping. Keys are extensions WITH the dot
+# (case-insensitive); values are subfolder names inside documents_root.
+# Extensions not listed here are refused by the tool.
+extensions:
+  ".pdf": "pdf"
+  ".txt": "text"
+  ".md": "text"
+  ".markdown": "text"
+  ".html": "html"
+  ".htm": "html"
+  ".docx": "word"
+  ".odt": "openoffice"
+
+# 2. Extraction outputs — two distinct stores:
+#    a) extraction_output_dir is the CANONICAL extracted-content store:
+#       each extracted document is serialized there as <stem>.json. This
+#       is the fixable persistence layer: a user can edit the JSON to
+#       correct an unfixable source, then ask for a re-ingestion, which
+#       resumes from this file and bypasses the extractor entirely.
+#    b) extraction_mineru_output_dir is MinerU's own working sandbox
+#       (its raw artifacts) — internal, not meant to be edited.
+extraction_output_dir: "data/extracted"
+
+# Extraction checkpoint store: the human-editable JSON job file
+# remembering which documents have already been extracted (relative
+# to the project root; absolute paths are also accepted).
+extraction_job_file: "data/cache/extraction_jobs.json"
+
+# MinerU working folder (relative to the project root; absolute paths
+# are also accepted). The extractor lays out its artifacts as
+# <extraction_mineru_output_dir>/<pdf stem>/auto/.
+extraction_mineru_output_dir: "data/extracted/mineru"
+
+# Suffix of the MinerU JSON output file: the extractor looks for
+# <pdf stem><mineru_json_extension> inside the auto/ folder above.
+mineru_json_extension: "_content_list.json"
+
+# 3. Summarization — three concerns:
+#
+#    a) summarization_output_dir: where the fully-summarized
+#       DocumentExtract is stored after a successful summarization, as
+#       <stem>.json (same full-fidelity serialization as the canonical
+#       extraction store). LLM summarization is expensive: on a later
+#       re-ingestion (failed downstream step, system restart...), the
+#       summarizer resumes from this file and makes ZERO LLM calls. A
+#       content fingerprint recorded in the envelope guarantees the
+#       stored summaries match the current canonical extraction — a
+#       fixed or re-extracted document is re-summarized, not stale.
+#       The checkpoint side (which documents were summarized) lives in
+#       summarization_job_file above; a "force summarization" request
+#       bypasses both and re-runs the LLM pass.
+#
+#    b) summary_min_chars: content shorter than this (raw_text for blocks,
+#       sections and pages; combined sub-summaries for chapters and the
+#       document) is copied verbatim into the summary field — no LLM call,
+#       a short text IS its own summary.
+#
+#    c) summary_max_chars: target size the summarizer LLM is asked to stay
+#       under. A longer answer is kept but reported as a warning.
+summarization_output_dir: "data/summarized"
+
+# Summarization checkpoint store: same contract as the extraction job
+# file, for the summarization step. The summarizer records summarized
+# documents there; delete an entry (or the file) to force a
+# re-summarization on the next ingestion.
+summarization_job_file: "data/cache/summarization_jobs.json"
+
+
+summary_min_chars: 1000
+summary_max_chars: 2500

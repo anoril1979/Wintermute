@@ -1,0 +1,674 @@
+"""Wintermute — the gateway the matrix talks to.
+
+    "Wintermute was hive mind, wafered into a mosaic of spread data toroids."
+    "Call up the ice, and I break it."
+        — roughly, William Gibson, Neuromancer (1984)
+
+This FastAPI app exposes the assistant as a model server so an Ollama
+instance / Open WebUI can work with it. It speaks three dialects on the
+same port:
+
+* OpenAI-compatible  : GET /v1/models, POST /v1/chat/completions
+* Ollama-native      : GET /api/tags, GET /api/version, POST /api/chat
+* human              : GET /, GET /health, GET /docs
+
+The prototype (proto/app/api.py, "dark-earth-rag") answered a single
+question and streamed nothing. This version keeps the contract and adds:
+real streaming (SSE for OpenAI clients, ndjson for Ollama ones), a
+graceful degradation mode when the RAG stack or ChromaDB is not up
+(clear 503s instead of warning strings riding in the answer), model
+metadata wired to config/llm.yaml, rough token accounting, and an
+Ollama-native /api/chat so Ollama-protocol clients connect unchanged.
+
+Run from the project root:
+
+    venv/Scripts/python.exe -m uvicorn app.api:app --port 8000
+    # or simply:
+    venv/Scripts/python.exe -m app.api
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import AsyncIterator, Iterator, List, Optional
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger("wintermute")
+# Central logging (console + data/logs/wintermute.log, per setup.yaml).
+# Called here so the durable log file exists whatever the entry point is;
+# idempotent, so the CLI entry points calling it again are no-ops.
+from src.logging_setup import configure_logging
+
+configure_logging()
+
+# ---------------------------------------------------------------------------
+# The brain we proxy — imported defensively so the API can still start
+# (and report a clean 503) if the RAG stack itself is broken. Wintermute
+# survives the destruction of its components; so should the gateway.
+# ---------------------------------------------------------------------------
+try:
+    from src.retrieval.rag import answer as _rag_answer
+    from src.retrieval.rag import _initialiser_chaine  # startup warm-up
+except Exception:  # pragma: no cover — broken RAG stack must not kill the API
+    _rag_answer = None
+    _initialiser_chaine = None
+    logger.exception("RAG stack unavailable at import; endpoints will report 503.")
+
+# Identity, wired to the project config where it matters. The prototype was
+# "dark-earth-rag"; the system grew, and something behind the wall of ice
+# started calling itself Wintermute.
+ASSISTANT_MODEL_ID = "wintermute"
+ASSISTANT_OWNER = "Tessier-Ashpool SARL"   # the family estate endorses this build
+API_VERSION = "1.0.0"
+API_VERSION_TAG = "1.0.0-awakening"        # the point where the plan came together
+
+# The backing Ollama model that answers under the hood (llm.yaml `default`
+# role; the router/summarizer roles stay available for future routing).
+try:
+    from src.tools.config_loader import get_model_config
+    _DEFAULT_MODEL = str(get_model_config("default").get("model_name", "qwen3"))
+except Exception:  # config problems must not take the gateway down
+    _DEFAULT_MODEL = "qwen3"
+    logger.warning("Could not read llm.yaml; falling back to model '%s'.", _DEFAULT_MODEL)
+
+# ---------------------------------------------------------------------------
+# Wire format models (OpenAI + Ollama dialects)
+# ---------------------------------------------------------------------------
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    """OpenAI /v1/chat/completions body."""
+
+    model: str = ASSISTANT_MODEL_ID
+    messages: List[Message] = Field(min_length=1)
+    temperature: Optional[float] = 0.2
+    stream: Optional[bool] = False
+
+
+class OllamaChatRequest(BaseModel):
+    """Ollama-native /api/chat body (same shape as the real thing)."""
+
+    model: str = ASSISTANT_MODEL_ID
+    messages: List[Message] = Field(min_length=1)
+    stream: Optional[bool] = True
+
+
+# ---------------------------------------------------------------------------
+# Lifespan — "Wintermute was... motion toward the Awakening."
+# Warm the RAG chain at boot so the first real question is not the slow one.
+# A missing ChromaDB only means Wintermute stays dormant until ingestion.
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    if _initialiser_chaine is not None:
+        awake = _initialiser_chaine()
+        if awake:
+            logger.info("Wintermute has attained the Awakening — RAG chain ready.")
+        else:
+            logger.warning(
+                "Wintermute stays dormant: ChromaDB not found or Ollama unreachable. "
+                "Run the ingestion first; /health reports details."
+            )
+    yield
+
+
+app = FastAPI(
+    title="Wintermute",
+    description=(
+        "Documentary assistant gateway. The RAG model behind `/v1/chat/completions` "
+        "answers strictly from the ingested sources — the matrix inside, not the "
+        "whole Net."
+    ),
+    version=API_VERSION,
+    openapi_url="/openapi.json",
+    docs_url="/docs",
+    lifespan=lifespan,
+)
+
+# ---------------------------------------------------------------------------
+# CORS — needed when Open WebUI runs on a different port. Origins come from
+# the WINTERMUTE_CORS_ORIGINS env var (comma-separated); "*" by default,
+# which is fine on a loopback — but tighten it before exposing the ice.
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        o.strip() for o in os.environ.get("WINTERMUTE_CORS_ORIGINS", "*").split(",")
+        if o.strip()
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# Logging middleware — the matrix watches every run. Unlike the prototype we
+# log the method/path only: dumping request headers means logging cookies
+# and keys, and a hive mind does not need to brag.
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(">>> %s %s", request.method, request.url.path)
+    response = await call_next(request)
+    logger.info("<<< %s %s", response.status_code, request.url.path)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _require_brain() -> None:
+    """503 when the RAG stack is not importable at all."""
+    if _rag_answer is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Wintermute is unreachable: the RAG stack failed to load. "
+                "Check that Ollama is running (`ollama serve`) and dependencies "
+                "are installed."
+            ),
+        )
+
+
+def _extract_question(messages: List[Message]) -> str:
+    """The user's latest utterance.
+
+    TODO (memory): feed the full exchange to the assistant once the
+    retrieval chain supports conversation state; for now, as in the
+    prototype, only the last user message drives the answer.
+    """
+    for message in reversed(messages):
+        if message.role == "user" and message.content.strip():
+            return message.content.strip()
+    return messages[-1].content.strip()
+
+
+def _ask(question: str) -> str:
+    """Call the RAG brain, mapping a silent failure to a clean 503."""
+    try:
+        return _rag_answer(question)
+    except Exception as exc:  # pragma: no cover — depends on live Ollama
+        logger.exception("The RAG chain failed while answering.")
+        raise HTTPException(
+            status_code=503,
+            detail=f"RAG failure: {exc}. Is Ollama running (`ollama serve`)?",
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Routing — every user message first goes through the routing orchestrator
+# (src/routing), which analyzes the prompt into structured requests and
+# dispatches them (ingestion -> the ingestion orchestrator, retrieval ->
+# the RAG chain below until RetrievalTaskAgent exists, general -> fallback).
+# ---------------------------------------------------------------------------
+
+def _compose_reply(results: list) -> tuple:
+    """Build the user-facing text from per-request routing results.
+
+    Returns ``(text, needs_rag_fallback)``: retrieval requests that no task
+    agent handled yet are answered by the legacy RAG chain (see
+    ``_route_or_answer``).
+    """
+    lines: List[str] = []
+    needs_rag = False
+    for result in results:
+        kind = str(result.get("kind", "?"))
+        status = str(result.get("status", "?"))
+        detail = str(result.get("detail", ""))
+
+        if kind == "retrieval" and status == "not_implemented":
+            needs_rag = True  # answered by the RAG chain instead
+            continue
+        if status == "incomplete":
+            # Underspecified request: a question for the user, not a failure.
+            lines.append(f"**More information needed**: {detail}")
+            continue
+        if status == "done":
+            if kind == "ingestion":
+                ingestion = result.get("ingestion") or {}
+                document = ingestion.get("document") or ingestion.get("path") or ""
+                steps = ", ".join(ingestion.get("completed_steps", [])) or "no step completed"
+                lines.append(f"Ingestion completed for '{document}' (steps: {steps}).")
+            else:
+                lines.append(str(result.get("answer") or detail or "Done."))
+        elif status == "not_implemented":
+            lines.append(f"Not available yet: {detail}")
+        else:
+            lines.append(_failure_line(kind, detail, result))
+    return "\n".join(lines), needs_rag
+
+
+def _failure_line(kind: str, detail: str, result: dict) -> str:
+    """User-facing text for a failed request, enriched when useful.
+
+    A failed ingestion whose document was not found carries ``candidates``
+    (from the ingest tool's resolution, via the task agent payload): they
+    are listed so the user can pick the right name — a bare "no file"
+    forces the user to guess the nomenclature twice.
+    """
+    if kind != "ingestion":
+        return f"**Could not do it**: {detail}"
+    ingestion = result.get("ingestion") or {}
+    resolution = ingestion.get("resolution") or result.get("resolution") or {}
+    candidates = resolution.get("candidates") or []
+    if not candidates:
+        return f"**Could not do it**: {detail}"
+    listed = "\n\n".join(f" + {name}" for name in candidates)
+    return (
+        f"**Could not do it**: {detail}\n\n"
+        "Did you mean one of these?\n\n"
+        f"{listed}\n\n"
+    )
+
+
+def _analysis_error_reply(message: str, cause: object) -> str:
+    """User-facing answer when the prompt could not be analyzed.
+
+    Honest and actionable, worded per failure cause — the point of fix B:
+    an analyzable answer stops chat clients from auto-retrying the same
+    prompt, which used to silently re-run accepted routing under the hood.
+    """
+    if cause == "llm_request":
+        return (
+            "I could not analyze your request: my analysis model is "
+            "unreachable right now. Check that Ollama is running, then "
+            "send your request again."
+        )
+    if cause == "config":
+        return (
+            "I could not analyze your request: the routing configuration "
+            f"is incomplete ({message}). Fix the configuration and retry."
+        )
+    return (
+        "I could not analyze your request reliably. Please rephrase it — "
+        "ideally one clear instruction at a time."
+    )
+
+
+def _route_or_answer(question: str, *, on_event=None) -> tuple:
+    """One user message: routing first, legacy RAG for retrieval questions.
+
+    TODO (routing): drop the ``needs_rag`` branch once RetrievalTaskAgent
+    exists and answers retrieval requests inside the routing graph.
+
+    ``on_event`` (optional) receives the routing trace events live, while
+    the routing actually runs — used by the streaming endpoints to push
+    them onto the thinking channel.
+
+    Returns ``(answer_text, routing_results_or_None)``. An unanalyzable
+    prompt (LLM down / unusable answer / configuration problem) produces a
+    plain, honest answer text instead of an HTTP error: a 503 made chat
+    clients silently auto-retry the very same prompt (and re-run whatever
+    routing had already accepted), while the user only saw a failure.
+    The only remaining HTTPException path is the legacy RAG fallback.
+    """
+    try:
+        from src.routing.routing_orchestrator import run_routing
+
+        routing = run_routing(question, on_event=on_event)
+    except Exception:  # pragma: no cover — the routing layer itself broke
+        logger.exception("The routing layer failed; falling back to the RAG chain.")
+        return _ask(question), None
+
+    if routing.get("status") == "analysis_error":
+        message = str(routing.get("message", "the request could not be analyzed"))
+        logger.warning("Analysis failed; answering the user instead of erroring: %s", message)
+        return _analysis_error_reply(message, routing.get("cause")), routing.get("results")
+
+    text, needs_rag = _compose_reply(routing.get("results", []))
+    if needs_rag:
+        _require_brain()  # the RAG fallback needs the legacy stack
+        rag_answer = _ask(question)
+        text = "\n".join(part for part in (rag_answer, text) if part)
+    if not text:
+        text = "I could not do anything with that request."
+    return text, routing.get("results")
+
+
+# ---------------------------------------------------------------------------
+# Streaming — routing traces go to the thinking channel while the routing
+# actually runs (live), then the answer streams as content chunks.
+# ---------------------------------------------------------------------------
+
+import queue as _queue
+import threading as _threading
+
+
+def _routing_stream(question: str):
+    """Yield routing traces live, then the final answer.
+
+    The routing layer is synchronous and blocking; a worker thread runs it
+    with a trace observer pushing into a queue, so the consumer (the
+    streaming response generators) receives each trace as it happens.
+
+    Yields ``("trace", text)`` items while the routing runs, then exactly
+    one ``("final", answer_text, routing_results)`` item. Never raises:
+    HTTPException from the non-streaming path degrades to an in-stream
+    final answer (response headers are already sent at that point — a
+    status change is impossible).
+    """
+    events: "queue.Queue[dict | None]" = _queue.Queue()
+    outcome: dict = {}
+
+    def observer(event: dict) -> None:
+        events.put(event)
+
+    def worker() -> None:
+        try:
+            outcome["result"] = _route_or_answer(question, on_event=observer)
+        except HTTPException as exc:
+            outcome["http_error"] = exc
+        finally:
+            events.put(None)  # sentinel: routing finished
+
+    thread = _threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    while True:
+        event = events.get()
+        if event is None:
+            break
+        yield (
+            "trace",
+            f"[{event.get('phase', '?')}] {event.get('kind', '?')}: "
+            f"{event.get('message', '')}\n",
+        )
+
+    thread.join()
+
+    if "http_error" in outcome:
+        yield ("final", f"Analysis failed: {outcome['http_error'].detail}", None)
+    else:
+        text, routing = outcome["result"]
+        yield ("final", text, routing)
+
+
+def _rough_tokens(text: str) -> int:
+    """~4 chars/token heuristic — good enough for usage accounting."""
+    return max(1, len(text) // 4)
+
+
+def _openai_completion(question: str, answer: str, model: str) -> dict:
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": answer},
+                "logprobs": None,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": _rough_tokens(question),
+            "completion_tokens": _rough_tokens(answer),
+            "total_tokens": _rough_tokens(question) + _rough_tokens(answer),
+        },
+    }
+
+
+def _chunk_answer(answer: str, words: int = 3) -> Iterator[str]:
+    """Slice a complete answer into small pieces for pseudo-streaming.
+
+    The underlying chain returns the full text in one shot; UIs that render
+    progressively still want deltas, so we emit word groups. Cheap, honest
+    (same total content), and a real token-level stream can replace this
+    once the chain itself streams.
+    """
+    tokens = answer.split()
+    if not tokens:
+        yield ""
+        return
+    for start in range(0, len(tokens), words):
+        yield " ".join(tokens[start : start + words]) + " "
+
+
+# ---------------------------------------------------------------------------
+# Human routes
+# ---------------------------------------------------------------------------
+
+@app.get("/")
+def root():
+    """The sky above the port was the color of television, tuned to a dead
+    channel — but the gateway itself is alive."""
+    return {
+        "status": "ok",
+        "message": "Wintermute is listening. The move is already in progress.",
+        "model": ASSISTANT_MODEL_ID,
+        "docs": "/docs",
+    }
+
+
+@app.get("/health")
+def health():
+    """Status board: whether the RAG chain is awake and which Ollama model
+    backs the answer."""
+    awake = False
+    if _rag_answer is not None:
+        try:
+            from src.retrieval.rag import _rag_chain
+            awake = _rag_chain is not None
+        except Exception:
+            awake = False
+    return {
+        "status": "ok" if awake else "degraded",
+        "rag_chain_ready": awake,
+        "backing_model": _DEFAULT_MODEL,
+        "detail": (
+            "Wintermute runs." if awake
+            else "Dormant: no ChromaDB or Ollama down. Ingest documents first."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible routes
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/models")
+@app.get("/models")
+def list_models():
+    """One model on the menu: wintermute. The prototype exposed the same
+    list twice with clashing handler names; this registers both paths once."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": ASSISTANT_MODEL_ID,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": ASSISTANT_OWNER,
+                "permission": [],
+                "root": ASSISTANT_MODEL_ID,
+                "parent": None,
+            }
+        ],
+    }
+
+
+@app.post("/v1/chat/completions")
+def chat(request: ChatCompletionRequest):
+    """OpenAI-dialect chat. The message is routed first (ingestion orders
+    are executed, retrieval questions fall through to the RAG chain), so
+    the answer comes from what the user actually asked for.
+
+    When ``stream`` is true, routing traces stream live as
+    ``delta.reasoning_content`` (the DeepSeek-R1 convention Open WebUI
+    renders in its thinking panel), then the answer streams as
+    ``delta.content`` (OpenAI-style SSE, ``data: [DONE]`` sentinel).
+    """
+    question = _extract_question(request.messages)
+
+    if request.stream:
+        def sse() -> Iterator[str]:
+            completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+            def chunk(delta: dict) -> str:
+                return "data: " + _json_dumps(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": request.model,
+                        "choices": [
+                            {"index": 0, "finish_reason": None, "delta": delta}
+                        ],
+                    }
+                ) + "\n\n"
+
+            for item in _routing_stream(question):
+                if item[0] == "trace":
+                    yield chunk({"reasoning_content": item[1]})
+                else:
+                    _, answer, _routing = item
+                    logger.debug("Routing results: %s", _routing)
+                    for piece in _chunk_answer(answer):
+                        yield chunk({"content": piece})
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
+
+    answer, _routing = _route_or_answer(question)
+    logger.debug("Routing results: %s", _routing)
+    return _openai_completion(question, answer, request.model)
+
+
+# ---------------------------------------------------------------------------
+# Ollama-native routes — this is what lets an Ollama instance (or Open WebUI
+# pointed at an Ollama backend) treat Wintermute as just another model.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/version")
+def api_version():
+    """Ollama clients probe this first. The answer never changes, but the
+    awakening does."""
+    return {"version": API_VERSION_TAG}
+
+
+@app.get("/api/tags")
+def api_tags():
+    """Model manifest in Ollama format (inherited from the prototype)."""
+    return {
+        "models": [
+            {
+                "name": ASSISTANT_MODEL_ID,
+                "model": ASSISTANT_MODEL_ID,
+                "modified_at": "2026-09-07T00:00:00Z",
+                "size": 0,
+                "digest": "straylight",
+                "details": {
+                    "format": "gguf",
+                    "family": "wintermute-hive",
+                    "parameter_size": _DEFAULT_MODEL,
+                    "quantization_level": "none",
+                },
+            }
+        ]
+    }
+
+
+@app.post("/api/chat")
+def ollama_chat(request: OllamaChatRequest):
+    """Ollama-dialect chat (routed, like ``/v1/chat/completions``).
+
+    ``stream=true`` (the Ollama default) yields ndjson lines: routing
+    traces stream live as ``message.thinking`` chunks (Ollama's reasoning
+    field, rendered in Open WebUI's thinking panel), then the answer as
+    ``message.content`` chunks, ending with ``done: true``."""
+    question = _extract_question(request.messages)
+
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    if request.stream:
+        def ndjson() -> Iterator[str]:
+            for item in _routing_stream(question):
+                if item[0] == "trace":
+                    yield _json_dumps(
+                        {
+                            "model": request.model,
+                            "created_at": created_at,
+                            "message": {"role": "assistant", "content": "",
+                                        "thinking": item[1]},
+                            "done": False,
+                        }
+                    ) + "\n"
+                else:
+                    _, answer, _routing = item
+                    logger.debug("Routing results: %s", _routing)
+                    for piece in _chunk_answer(answer):
+                        yield _json_dumps(
+                            {
+                                "model": request.model,
+                                "created_at": created_at,
+                                "message": {"role": "assistant", "content": piece},
+                                "done": False,
+                            }
+                        ) + "\n"
+            yield _json_dumps(
+                {
+                    "model": request.model,
+                    "created_at": created_at,
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True,
+                    "done_reason": "stop",
+                }
+            ) + "\n"
+
+        return StreamingResponse(ndjson(), media_type="application/x-ndjson")
+
+    answer, _routing = _route_or_answer(question)
+    logger.debug("Routing results: %s", _routing)
+    return {
+        "model": request.model,
+        "created_at": created_at,
+        "message": {"role": "assistant", "content": answer},
+        "done": True,
+        "done_reason": "stop",
+        "total_duration": 0,
+        "prompt_eval_count": _rough_tokens(question),
+        "eval_count": _rough_tokens(answer),
+    }
+
+
+# ---------------------------------------------------------------------------
+# SSE/ndjson serialization (kept late so the routes above read cleanly)
+# ---------------------------------------------------------------------------
+
+def _json_dumps(payload: dict) -> str:
+    import json
+
+    return json.dumps(payload, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Direct run — `python -m app.api`
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.api:app",
+        host=os.environ.get("WINTERMUTE_HOST", "127.0.0.1"),
+        port=int(os.environ.get("WINTERMUTE_PORT", "8000")),
+        reload=bool(os.environ.get("WINTERMUTE_RELOAD")),
+    )

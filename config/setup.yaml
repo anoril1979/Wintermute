@@ -1,0 +1,24 @@
+# ============================================================
+# setup.yaml — Paramètres généraux (non sensibles)
+# Les valeurs entre <...> sont des placeholders à remplacer.
+# Tous les identifiants et secrets sont exclusivement définis
+# dans le fichier .env à la racine du projet — jamais ici.
+# ============================================================
+
+api:
+  host: "127.0.0.1"
+  port: 8000
+  reload: true                            # utile en dev, à désactiver en prod
+
+ollama:
+  base_url: "http://localhost:11434"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  # Durable log file (relative to the project root; "" disables file logging).
+  file: "data/logs/wintermute.log"
+  # Rotation of the log file: wintermute.log, then .log.1, .log.2, ...
+  max_bytes: 5242880                        # 5 MiB per file
+  backup_count: 3                           # keep 3 rotated files
+

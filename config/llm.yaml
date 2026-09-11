@@ -1,0 +1,114 @@
+# ============================================================
+# llm.yaml — Modèles Ollama disponibles et leur rôle fonctionnel
+# Les valeurs entre <...> sont des placeholders à remplacer
+# selon les modèles réellement installés dans votre instance Ollama.
+#
+# Clés de taille/temps par rôle (attention, deux natures différentes) :
+#   context_window      — fenêtre de contexte du modèle (prompt + historique,
+#                         option Ollama num_ctx). Combien le modèle PEUT lire.
+#   max_response_tokens — budget de génération par appel (option Ollama
+#                         num_predict), plafond par défaut que les agents
+#                         peuvent resserrer appel par appel. Combien le
+#                         modèle PEUT écrire.
+#   timeout_seconds     — délai client HTTP par requête (combien de temps
+#                         NOUS attendons une réponse).
+#   keep_alive          — durée de rétention du modèle en mémoire côté
+#                         Ollama ENTRE les requêtes (ex. "5m") ; évite le
+#                         rechargement à froid au prochain appel.
+# ============================================================
+
+models:
+
+  router:
+    model_name: "llama3:8b"             # modèle léger/rapide pour classifier l'intention
+    temperature: 0.0
+    max_response_tokens: 256
+    timeout_seconds: 15
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Classifie l'intention utilisateur (résumé, alerte, question agenda, recherche libre)"
+
+  # Rôle dédié au routage des requêtes d'ingestion : validation des
+  # requêtes utilisateur et conversion en tâches structurées pour
+  # l'orchestrateur d'ingestion.
+  # (Placeholder — l'agent de validation sera implémenté plus tard ; le
+  # Classifie une requête d'ingestion utilisateur (intention : première
+  # ingestion / re-ingestion forcée / résumés à refaire) et formule les
+  # demandes de clarification. Voir src/ingestion/ingestion_router.py et
+  # prompts/routing/ingestion_intent.md / ingestion_clarification.md.
+  ingestion_router:
+    model_name: "llama3:8b"
+    temperature: 0.0
+    max_response_tokens: 256
+    timeout_seconds: 15
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Valide les requêtes d'ingestion et les convertit en tâches structurées pour l'orchestrateur d'ingestion"
+
+  # Rôle dédié à l'orchestrateur de routage (src/routing) : analyse du
+  # prompt utilisateur brut, explosion en requêtes structurées
+  # (UserRequest) et classification (ingestion / retrieval / general).
+  # Valeurs placeholder : à régler par l'utilisateur.
+  request_analyzer:
+    model_name: "llama3:8b"
+    temperature: 0.0
+    max_response_tokens: 512
+    timeout_seconds: 30
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Analyse le prompt utilisateur, l'explose en requêtes structurées et les classe (ingestion / retrieval / general)"
+
+  # Rôle dédié au GeneralTaskAgent (src/agents/agents/general_task_agent.py) :
+  # réponses aux requêtes hors périmètre (small talk, culture générale,
+  # questions sur le système) avec la connaissance propre du modèle,
+  # incarnant Wintermute. Température haute voulue : créativité et
+  # personnalité encouragées — rien ici ne touche au corpus ingéré.
+  general_task:
+    model_name: "llama3:8b"
+    temperature: 1.0
+    max_response_tokens: 1024
+    timeout_seconds: 60
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Répond aux requêtes générales (hors corpus) en incarnant Wintermute — ton cyberpunk, knowledge propre du modèle"
+
+  summarizer:
+    model_name: "llama3:8b"           # modèle plus capable pour synthèse et rédaction
+    temperature: 0.4
+    max_response_tokens: 1024
+    timeout_seconds: 60
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Génère résumés et réponses nuancées à partir des données email/agenda"
+
+  default:
+    model_name: "llama3:8b"           # fallback si aucun rôle spécifique n'est requis
+    temperature: 2.0
+    max_response_tokens: 512
+    timeout_seconds: 30
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Modèle par défaut pour toute tâche non explicitement routée"
+
+defaults:
+  active_router: "router"
+  active_summarizer: "summarizer"
+  active_default: "default"
