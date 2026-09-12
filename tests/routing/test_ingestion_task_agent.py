@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 from src.agents.agents.ingestion_task_agent import IngestionTaskAgent
 from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentStatus, FailureDomain
-from src.routing import models as routing_models
-from src.routing.models import RequestKind, UserRequest
+from src.routing.models import IngestionRequest, RetrievalRequest
 
 
-def _request(document="a.pdf", force=False):
-    return UserRequest(
-        kind=RequestKind.INGESTION, utterance="ingest a.pdf", document=document,
-        options={"force_reingest": force},
+def _request(document="a.pdf", force=False, origin=None):
+    return IngestionRequest(
+        utterance=f"ingest {document}", document=document,
+        force=force, origin=origin,
     )
 
 
@@ -75,9 +75,24 @@ class IngestionTaskAgentTest(unittest.TestCase):
         self.assertEqual(result.status, AgentStatus.FAILED)
         self.assertIn("extraction_validation", result.detail)
 
+    def test_origin_is_forwarded_to_the_pipeline(self):
+        seen = {}
+
+        def runner(path, force=False, **kwargs):
+            seen.update(kwargs)
+            return {"status": "accepted"}
+
+        with unittest.mock.patch("src.tools.ingest_tool.ingest_document",
+                                 return_value={"status": "ready", "path": "x/a.pdf"}):
+            result = IngestionTaskAgent(runner=runner).run(
+                self.context, _request(origin="canon"))
+        self.assertEqual(result.status, AgentStatus.OK)
+        self.assertEqual(seen.get("origin"), "canon")
+
     def test_out_of_contract_request_is_refused(self):
-        retrieval = UserRequest(kind=RequestKind.RETRIEVAL, utterance="u", question="q?")
-        result = IngestionTaskAgent(runner=lambda p, force=False, **kw: {}).run(self.context, retrieval)
+        retrieval = RetrievalRequest(utterance="u", question="q?")
+        result = IngestionTaskAgent(runner=lambda p, force=False, **kw: {}).run(
+            self.context, retrieval)
         self.assertEqual(result.status, AgentStatus.FAILED)
         self.assertEqual(result.failure_domain, FailureDomain.INPUT_DATA)
 
@@ -95,9 +110,6 @@ class IngestionTaskAgentTest(unittest.TestCase):
             force_summarization=False,
         )
         self.assertEqual(out, {"status": "accepted"})
-
-
-import unittest.mock  # noqa: E402  (used via unittest.mock.patch in methods above)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,22 @@
-"""LLM-backed request analyzer.
+"""LLM-backed request analyzer — the ONE analysis of the front door.
 
 Calls the ``request_analyzer`` role (config/llm.yaml) with the analysis
 prompt (prompts/routing/request_analysis.md) plus the raw user prompt, and
-validates the answer into an :class:`AnalysisResult` (src/routing/models.py).
+validates the answer into a grouped :class:`AnalysisResult`
+(src/routing/models.py): ``{"ingestion": [...], "retrieval": [...],
+"general": [...]}`` — with retrieval lookups already fully classified
+(``lookup_kind``) and self-contained questions, and ingestion intents
+carrying the stated origin/force/redo_summaries.
 
-The analyzer is the only LLM step of the routing front door: everything
-downstream (dispatch, agents) is plain Python. A failure here — Ollama
-unreachable, malformed JSON answer, schema-violating requests — raises
-:class:`RequestAnalysisError`, which the orchestrator reports as a
-retryable/agent-shaped failure instead of crashing the API.
+**One analysis, no re-routing**: pronouns are resolved here, at analysis
+time — nothing downstream re-reads the user's words. Ingestion and
+retrieval pipelines are deterministic Python; the only LLM-based
+post-routing worker is the GeneralTaskAgent (and later the AnswerAgent).
+
+A failure here — Ollama unreachable, malformed JSON answer,
+schema-violating requests — raises :class:`RequestAnalysisError`, which
+the orchestrator reports as a retryable/agent-shaped failure instead of
+crashing the API.
 """
 
 from __future__ import annotations
@@ -50,7 +58,7 @@ class RequestAnalysisError(Exception):
 
 
 class RequestAnalyzer:
-    """Explodes a raw user prompt into validated, structured requests."""
+    """Explodes a raw user prompt into validated, grouped-scope requests."""
 
     def __init__(self, llm_role: str = "request_analyzer") -> None:
         self._llm_role = llm_role
@@ -84,7 +92,7 @@ class RequestAnalyzer:
     # -- public API --------------------------------------------------------------
 
     def analyze(self, user_prompt: str) -> AnalysisResult:
-        """Analyze a raw user prompt into an ordered list of UserRequest.
+        """Analyze a raw user prompt into a grouped AnalysisResult.
 
         Raises:
             RequestAnalysisError: the prompt could not be analyzed —
@@ -93,14 +101,14 @@ class RequestAnalyzer:
         """
         if not user_prompt or not user_prompt.strip():
             # Nothing to analyze: an empty batch, not an error.
-            return AnalysisResult(requests=[])
+            return AnalysisResult()
 
         if prompt_is_meta(user_prompt):
             # Front-end auxiliary task (title/tags/follow-ups) that slipped
             # past the API guard: refuse it here rather than produce a
             # garbage analysis — last line of defense.
             logger.warning("Meta/background prompt refused at the analyzer boundary.")
-            return AnalysisResult(requests=[])
+            return AnalysisResult()
 
         prompt = self._build_prompt(user_prompt)
         logger.info(
@@ -133,5 +141,12 @@ class RequestAnalyzer:
                 cause="llm_response",
             ) from exc
 
-        logger.info("Analyzed prompt into %d request(s).", len(result.requests))
+        logger.info(
+            "Analyzed prompt into %d request(s) "
+            "(ingestion=%d, retrieval=%d, general=%d).",
+            result.request_count,
+            len(result.ingestion),
+            len(result.retrieval),
+            len(result.general),
+        )
         return result

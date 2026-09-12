@@ -26,9 +26,12 @@ from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentResult
 
 #: Registry keys the routing graph looks task agents up under.
+#: Keyed by request scope label (the wire vocabulary the graph emits):
+#: "ingestion" -> ingestion_task, "retrieval" -> retrieval_task,
+#: "general" -> general_task.
 TASK_AGENT_KEYS = {
-    "retrieval": "retrieval_task",
     "ingestion": "ingestion_task",
+    "retrieval": "retrieval_task",
     "general": "general_task",
 }
 
@@ -49,10 +52,11 @@ class UserTaskAgent(Protocol):
 
         Args:
             context: the routing context shared by the whole request batch.
-            request: the ``UserRequest`` (src/routing/models.py) to handle.
-                Typed as ``object`` here to avoid an import cycle — the
-                request models belong to the routing layer, which depends
-                on this package; implementations narrow the type.
+            request: one of the request models (src/routing/models.py:
+                IngestionRequest / RetrievalRequest / GeneralRequest) to
+                handle. Typed as ``object`` here to avoid an import cycle
+                — the request models belong to the routing layer, which
+                depends on this package; implementations narrow the type.
 
         Returns:
             The agent's outcome; ``payload`` carries whatever the caller

@@ -2,22 +2,30 @@
 
 Called by the app API (app/api.py) for every user message, it:
 
-    1. analyzes the raw prompt into an ordered list of structured requests
+    1. analyzes the raw prompt ONCE into requests grouped by scope
        (RequestAnalyzer, ``request_analyzer`` LLM role, prompt
-       prompts/routing/request_analysis.md);
-    2. hands the batch to the routing graph (src/graphs/routing_graph.py),
-       which dispatches each request to its task agent:
-         retrieval  -> RetrievalTaskAgent  (future retrieval orchestrator)
-         ingestion  -> IngestionTaskAgent  (this repo: ingestion orchestrator)
-         general    -> GeneralTaskAgent    (out-of-scope answers, in persona);
+       prompts/routing/request_analysis.md) — retrieval lookups arrive
+       already classified with self-contained questions, ingestion orders
+       with document/force/origin. Pronouns are resolved at analysis
+       time; nothing downstream re-reads the user's words;
+    2. hands the grouped result to the routing graph
+       (src/graphs/routing_graph.py), which dispatches the flattened
+       requests in grouped scope order (ingestions, then retrievals, then
+       generals) to their task agent:
+         ingestion -> IngestionTaskAgent  (deterministic orchestrator)
+         retrieval -> RetrievalTaskAgent  (deterministic pipeline)
+         general   -> GeneralTaskAgent    (the only LLM-based worker;
+                                     later joined by the AnswerAgent);
+       Before dispatch, the graph applies the deterministic origin gate:
+       an ingestion whose origin cannot be decided (stated / stored /
+       inferred) is SET ASIDE, not ingested, and reported at the end;
     3. returns a structured, per-request result list the caller (API or
        CLI) turns into the user-facing reply.
 
 Task agents resolve from an injected registry; ``None`` builds the default
-registry (src/agents/routing_registry.build_default_task_agents), which
-currently contains the IngestionTaskAgent and the GeneralTaskAgent.
-Missing kinds surface as ``not_implemented`` per-request results — the
-batch never aborts.
+registry (src/agents/routing_registry.build_default_task_agents). Missing
+kinds surface as ``not_implemented`` per-request results — the batch never
+aborts.
 
 Failure policy: an analysis failure (LLM down, malformed answer) is
 reported as a top-level ``analysis_error`` with its cause so the calling
@@ -37,7 +45,11 @@ from src.agents.contexts import EventCallback, RoutingContext
 from src.agents.routing_registry import build_default_task_agents
 from src.graphs import RoutingGraph, RoutingOutcome
 from src.logging_setup import configure_logging
-from src.routing.models import UserRequest
+from src.routing.models import (
+    GeneralRequest,
+    IngestionRequest,
+    RetrievalRequest,
+)
 from src.routing.request_analyzer import RequestAnalysisError, RequestAnalyzer
 from src.tools.config_loader import ConfigError
 
@@ -96,15 +108,28 @@ def run_routing(
             "traces": list(context.events),
         }
 
-    requests: List[UserRequest] = list(analysis.requests)
+    requests = analysis.flattened()
     context.metadata["request_count"] = len(requests)
+    context.metadata["groups"] = {
+        "ingestion": len(analysis.ingestion),
+        "retrieval": len(analysis.retrieval),
+        "general": len(analysis.general),
+    }
+    summary_bits = [
+        f"{len(analysis.ingestion)} ingestion, "
+        f"{len(analysis.retrieval)} retrieval, "
+        f"{len(analysis.general)} general"
+    ]
     context.emit(
         "analysis",
         "understood",
-        f"{len(requests)} request(s): "
-        + "; ".join(f"[{r.kind.value}] {r.utterance}" for r in requests)
-        if requests else "no actionable request found in the prompt",
-        kinds=[r.kind.value for r in requests],
+        (
+            f"{len(requests)} request(s) ({summary_bits[0]})"
+            if requests
+            else "no actionable request found in the prompt"
+        ),
+        groups=context.metadata["groups"],
+        requests=[_request_summary(r) for r in requests],
     )
 
     # -- 2. dispatch ---------------------------------------------------------
@@ -142,6 +167,30 @@ def _resolve_task_agents(
     if agents is not None:
         return agents
     return build_default_task_agents()
+
+
+def _request_summary(request: object) -> dict:
+    """Compact per-request summary for the ``understood`` trace event."""
+    if isinstance(request, IngestionRequest):
+        return {
+            "scope": "ingestion",
+            "document": request.document,
+            "force": request.force,
+            "redo_summaries": request.redo_summaries,
+            "origin": request.origin,
+            "utterance": request.utterance,
+        }
+    if isinstance(request, RetrievalRequest):
+        return {
+            "scope": "retrieval",
+            "lookup_kind": request.lookup_kind.value,
+            "question": request.question,
+            "document": request.document,
+            "chapter_title": request.chapter_title,
+        }
+    if isinstance(request, GeneralRequest):
+        return {"scope": "general", "question": request.question}
+    return {"scope": type(request).__name__}
 
 
 # ---------------------------------------------------------------------------

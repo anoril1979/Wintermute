@@ -12,6 +12,7 @@ from typing import Dict
 
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
+from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
 from src.agents.agents.source_indexing_agent import SourceIndexingAgent
 from src.agents.agents.summarizer_agent import SummarizerAgent
 from src.agents.protocols import IngestionAgent
@@ -28,4 +29,16 @@ def build_default_agents() -> Dict[str, IngestionAgent]:
         "extraction_validator": ExtractionValidationAgent(),
         "summarizer": SummarizerAgent(),
         "source_indexer": SourceIndexingAgent(),
+    }
+
+
+def build_retrieval_agents() -> Dict[str, object]:
+    """Build the registry of the retrieval graph's agents.
+
+    Mirror of :func:`build_default_agents` for the read side: the retrieval
+    graph resolves its step keys (``STEPS`` values) here. As new retrieval
+    agents land (SQL relation/index readers), add them here.
+    """
+    return {
+        "semantic_retriever": SemanticRetrievalAgent(),
     }

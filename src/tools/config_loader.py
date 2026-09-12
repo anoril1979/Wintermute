@@ -79,11 +79,29 @@ class VectorConfigError(ConfigError):
     """
 
 
+class RoutingConfigError(ConfigError):
+    """setup.yaml's ``routing`` section is malformed or incomplete.
+
+    Raised by validate_routing_config/load_routing_config with a message
+    naming the faulty entry, so the yaml can be fixed by hand.
+    """
+
+
+class RetrievalConfigError(ConfigError):
+    """retrieval.yaml is malformed or incomplete.
+
+    Raised at load time by ``validate_retrieval_config``. Messages are
+    written to be forwarded verbatim to the user (or to the calling LLM)
+    so the yaml can be fixed without a debugger.
+    """
+
+
 PROJECT_ROOT = _find_project_root()
 CONFIG_DIR = PROJECT_ROOT / "config"
 SETUP_YAML_PATH = CONFIG_DIR / "setup.yaml"
 LLM_YAML_PATH = CONFIG_DIR / "llm.yaml"
 INGESTION_YAML_PATH = CONFIG_DIR / "ingestion.yaml"
+RETRIEVAL_YAML_PATH = CONFIG_DIR / "retrieval.yaml"
 ENV_PATH = PROJECT_ROOT / ".env"
 
 
@@ -672,6 +690,194 @@ def load_vector_config() -> dict:
     config = _load_yaml(SETUP_YAML_PATH)
     validate_vector_config(config)
     return config["vector_db"]
+
+
+# ------------------------------------------------------------------
+# setup.yaml — validation et chargement de la section routing
+# ------------------------------------------------------------------
+
+def validate_routing_config(config: object) -> dict:
+    """Validate setup.yaml's ``routing`` section; raise RoutingConfigError.
+
+    The section is optional (an absent ``routing`` key keeps the default:
+    ``max_requests_per_prompt = 8``); when present it is validated
+    strictly:
+
+    * ``max_requests_per_prompt`` (optional) is a strictly positive int —
+      the cap on how many structured requests one user prompt may yield;
+      a bool is rejected explicitly (a ``bool`` is an ``int`` in Python).
+
+    Returns the same dict on success, so callers can do
+    ``config = validate_routing_config(config)``.
+    """
+    prefix = "setup.yaml invalide (section routing)"
+
+    if not isinstance(config, dict):
+        raise RoutingConfigError(
+            f"{prefix}: le contenu doit être un mapping YAML "
+            f"(type trouvé : {type(config).__name__})."
+        )
+
+    if "routing" not in config:
+        return config
+    routing = config["routing"]
+    if not isinstance(routing, dict):
+        raise RoutingConfigError(
+            f"{prefix} : 'routing' doit être un mapping "
+            f"(type trouvé : {type(routing).__name__})."
+        )
+
+    if "max_requests_per_prompt" in routing:
+        cap = routing["max_requests_per_prompt"]
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+            raise RoutingConfigError(
+                f"{prefix} : 'routing.max_requests_per_prompt' doit être un "
+                f"entier strictement positif (valeur : {cap!r})."
+            )
+
+    return config
+
+
+@lru_cache(maxsize=1)
+def load_routing_config() -> dict:
+    """Load setup.yaml and return its validated ``routing`` section.
+
+    The section is optional: an absent section yields the default
+    ``{"max_requests_per_prompt": 8}`` so a minimal setup.yaml keeps
+    working. Malformed present values raise RoutingConfigError (a
+    ConfigError subclass) naming the faulty entry. Cached: read and
+    validated once per program run.
+    """
+    config = _load_yaml(SETUP_YAML_PATH)
+    validate_routing_config(config)
+    routing = config.get("routing") or {}
+    return {
+        "max_requests_per_prompt": int(
+            routing.get("max_requests_per_prompt", 8)
+        )
+    }
+
+
+# ------------------------------------------------------------------
+# retrieval.yaml — validation et chargement
+# ------------------------------------------------------------------
+
+def validate_retrieval_config(config: object) -> dict:
+    """Validate the full retrieval.yaml schema; raise RetrievalConfigError.
+
+    Checks (in order):
+
+    * the document is a mapping;
+    * ``default_top_k`` (required) and ``max_top_k`` (required) are
+      strictly positive ints with ``default_top_k <= max_top_k``;
+    * ``min_score`` (required) is a number in [0.0, 1.0] — a cosine
+      similarity threshold;
+    * ``embedding_role`` (required, non-empty string) names an llm.yaml
+      role — cross-file consistency is checked here because a typo would
+      otherwise surface as a runtime LLM failure;
+    * ``source_collection_key`` (required, non-empty string) is a plain
+      name (the key under setup.yaml's ``vector_db.collections``).
+    """
+    prefix = "retrieval.yaml invalide"
+
+    if not isinstance(config, dict):
+        raise RetrievalConfigError(
+            f"{prefix}: le contenu doit être un mapping YAML "
+            f"(type trouvé : {type(config).__name__})."
+        )
+
+    # -- required positive ints ---------------------------------------------
+    for key in ("default_top_k", "max_top_k"):
+        if key not in config:
+            raise RetrievalConfigError(
+                f"{prefix} : clé requise manquante '{key}'."
+            )
+        value = config[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise RetrievalConfigError(
+                f"{prefix} : '{key}' doit être un entier strictement positif "
+                f"(valeur : {value!r})."
+            )
+
+    if config["default_top_k"] > config["max_top_k"]:
+        raise RetrievalConfigError(
+            f"{prefix} : 'default_top_k' ({config['default_top_k']}) ne doit "
+            f"pas dépasser 'max_top_k' ({config['max_top_k']})."
+        )
+
+    # -- min_score -------------------------------------------------------------
+    if "min_score" not in config:
+        raise RetrievalConfigError(
+            f"{prefix} : clé requise manquante 'min_score' (seuil de "
+            "similarité cosine, entre 0.0 et 1.0)."
+        )
+    min_score = config["min_score"]
+    if not _is_number(min_score) or not 0.0 <= min_score <= 1.0:
+        raise RetrievalConfigError(
+            f"{prefix} : 'min_score' doit être un nombre entre 0.0 et 1.0 "
+            f"(valeur : {min_score!r})."
+        )
+
+    # -- embedding_role: must name an existing llm.yaml role -------------------
+    if "embedding_role" not in config:
+        raise RetrievalConfigError(
+            f"{prefix} : clé requise manquante 'embedding_role' (rôle llm.yaml "
+            "fournissant les embeddings des requêtes — le même modèle que "
+            "celui qui a indexé le corpus)."
+        )
+    embedding_role = config["embedding_role"]
+    if not isinstance(embedding_role, str) or not embedding_role.strip():
+        raise RetrievalConfigError(
+            f"{prefix} : 'embedding_role' doit être une chaîne non vide "
+            f"(type trouvé : {type(embedding_role).__name__})."
+        )
+    try:
+        llm_roles = set(load_llm_config().get("models", {}))
+    except Exception as exc:  # noqa: BLE001 — reported with the real cause below
+        raise RetrievalConfigError(
+            f"{prefix} : 'embedding_role' ({embedding_role!r}) n'a pas pu être "
+            f"vérifié contre llm.yaml : {exc}"
+        ) from exc
+    if embedding_role not in llm_roles:
+        raise RetrievalConfigError(
+            f"{prefix} : 'embedding_role' ({embedding_role!r}) ne nomme aucun "
+            "rôle de llm.yaml (rôles disponibles : "
+            f"{', '.join(sorted(llm_roles))}) — les requêtes doivent être "
+            "embedées avec le MÊME modèle que le corpus."
+        )
+
+    # -- source_collection_key ---------------------------------------------------
+    if "source_collection_key" not in config:
+        raise RetrievalConfigError(
+            f"{prefix} : clé requise manquante 'source_collection_key' (clé "
+            "sous setup.yaml vector_db.collections)."
+        )
+    collection_key = config["source_collection_key"]
+    if not isinstance(collection_key, str) or not collection_key.strip():
+        raise RetrievalConfigError(
+            f"{prefix} : 'source_collection_key' doit être une chaîne non vide "
+            f"(type trouvé : {type(collection_key).__name__})."
+        )
+    if "/" in collection_key or "\\" in collection_key or "\x00" in collection_key:
+        raise RetrievalConfigError(
+            f"{prefix} : 'source_collection_key' ({collection_key!r}) doit être "
+            "un nom simple de clé, pas un chemin."
+        )
+
+    return config
+
+
+@lru_cache(maxsize=1)
+def load_retrieval_config() -> dict:
+    """Load retrieval.yaml, validate the full schema and return it.
+
+    Lève RetrievalConfigError (sous-classe de ConfigError) avec un message
+    explicite désignant l'entrée fautive dès que le fichier est mal formé —
+    y compris pour une erreur de syntaxe YAML. Cached: read and validated
+    once per program run.
+    """
+    config = _load_yaml(RETRIEVAL_YAML_PATH)
+    return validate_retrieval_config(config)
 
 
 # ------------------------------------------------------------------

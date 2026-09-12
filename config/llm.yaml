@@ -53,7 +53,8 @@ models:
 
   # Rôle dédié à l'orchestrateur de routage (src/routing) : analyse du
   # prompt utilisateur brut, explosion en requêtes structurées
-  # (UserRequest) et classification (ingestion / retrieval / general).
+  # (IngestionRequest / RetrievalRequest / GeneralRequest) grouped by scope
+  # (ingestion / retrieval / general).
   # Valeurs placeholder : à régler par l'utilisateur.
   request_analyzer:
     model_name: "llama3:8b"
@@ -67,7 +68,12 @@ models:
     max_retries: 2
     description: "Analyse le prompt utilisateur, l'explose en requêtes structurées et les classe (ingestion / retrieval / general)"
 
-  # Rôle dédié au GeneralTaskAgent (src/agents/agents/general_task_agent.py) :
+  # NOTE: pas de rôle « retrieval_router » : la classification des
+  # requêtes de récupération (semantic / index / relation / summary /
+  # listing) est faite par l'analyseur unique (request_analyzer) — le
+  # pipeline de récupération est déterministe, sans LLM propre.
+
+  # Rôle dédié au GeneralTaskAgent (src/agents/agents/general_task_agent.py):
   # réponses aux requêtes hors périmètre (small talk, culture générale,
   # questions sur le système) avec la connaissance propre du modèle,
   # incarnant Wintermute. Température haute voulue : créativité et

@@ -1,13 +1,18 @@
-"""Routing graph: dispatch each structured user request to its task agent.
+"""Routing graph: dispatch the analyzed requests to their task agents.
 
-The routing orchestrator first analyzes the raw user prompt (request
-analyzer, ``request_analyzer`` LLM role) into an ordered list of
-:class:`UserRequest`. This graph then loops over that list and hands every
-request to the task agent registered under its kind's key:
+The routing orchestrator analyzes the raw user prompt ONCE (request
+analyzer, ``request_analyzer`` LLM role) into a grouped
+:class:`AnalysisResult`. This graph runs the flattened requests in
+**grouped scope order** — all ingestions, then all retrievals, then
+generals (``AnalysisResult.flattened()``) — and hands every request to
+the task agent registered under its kind's key:
 
-    retrieval  -> "retrieval_task"  (RetrievalTaskAgent — future)
-    ingestion  -> "ingestion_task"  (IngestionTaskAgent)
-    general    -> "general_task"    (GeneralTaskAgent)
+    ingestion -> "ingestion_task"  (IngestionTaskAgent)
+    retrieval -> "retrieval_task"  (RetrievalTaskAgent)
+    general   -> "general_task"    (GeneralTaskAgent)
+
+Ingestion and retrieval pipelines are deterministic Python (facts ->
+decision table -> graph); the only LLM-based worker is the general one.
 
 Per-request outcome, not per-graph outcome: each dispatched request
 produces one result entry in ``RoutingContext.results`` — the graph never
@@ -16,24 +21,40 @@ order must not prevent the question that follows it from being answered).
 Missing agents surface as ``not_implemented`` results, so the graph runs
 end-to-end while the task agents land one by one.
 
+**Deterministic gates, before any agent runs:**
+
+* an ingestion request without a document is REJECTED (the analyzer must
+  not invent file names; with a single analysis there is no second pass
+  to ask the user inside the loop — the user-facing reply says so);
+* an ingestion request whose origin cannot be decided deterministically
+  (user-stated, stored, or confidently inferred from the file name) is
+  SET ASIDE — not ingested, batch continues — and reported at the end:
+  an unverified origin must never reach storage silently.
+
 **Prompt-local memory**: dispatch is strictly sequential, so when request
 *i* runs, every earlier request of the same prompt has already been
 dispatched — and its outcome is known. The graph attaches those preceding
-entries (kind, utterance, status...) to each request
-(``UserRequest.preceding``) before handing it to the task agent, so an
-agent's LLM can resolve pronouns against the local context: "ingest
-meow.pdf, then summarize it" — *it* is meow.pdf for the second request.
+entries (kind, utterance, outcome) to each request (``preceding``) so an
+LLM-based agent (GeneralTaskAgent, later AnswerAgent) can compose its
+reply against what actually happened: "ingest meow.pdf, then summarize
+it" — the general/retrieval answer knows whether the ingestion worked.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.agents.contexts import RoutingContext
 from src.agents.task_protocols import TASK_AGENT_KEYS, UserTaskAgent
-from src.routing.models import RequestContextEntry, UserRequest
+from src.routing.models import (
+    GeneralRequest,
+    IngestionRequest,
+    RetrievalRequest,
+    RequestContextEntry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +62,28 @@ logger = logging.getLogger(__name__)
 STATUS_DONE = "done"                        # agent handled the request
 STATUS_NOT_IMPLEMENTED = "not_implemented"  # no agent for this kind yet
 STATUS_REJECTED = "rejected"                # request unusable (validation)
-STATUS_INCOMPLETE = "incomplete"            # underspecified: user must add info
+STATUS_SET_ASIDE = "set_aside"              # origin undecidable: NOT ingested
+
+#: Wire label for a request kind: the stable scope vocabulary the API
+#: composes replies with ("ingestion"/"retrieval"/"general"), not the
+#: Python class name.
+_KIND_LABELS = {
+    IngestionRequest: "ingestion",
+    RetrievalRequest: "retrieval",
+    GeneralRequest: "general",
+}
+
+
+def _kind_label(request: object) -> str:
+    """Scope label for a request (class name as defensive fallback)."""
+    return _KIND_LABELS.get(type(request), type(request).__name__)
 
 
 @dataclass
 class RequestOutcome:
     """Result of dispatching one structured user request."""
 
-    kind: str                                  # RequestKind value
+    kind: str                                  # request scope/type name
     utterance: str
     status: str                                # STATUS_* constant
     detail: str = ""                           # human-readable explanation
@@ -101,25 +136,26 @@ class RoutingGraph:
         Args:
             context:  the shared routing context (agents may stash state
                       there — retrieved documents, ingestion references...).
-            requests: the ordered ``UserRequest`` list produced by the
+            requests: the flattened request list produced by the analyzer
+                      (grouped-scope order: ingestions, retrievals,
+                      generals).
                       analyzer.
         """
         outcome = RoutingOutcome()
 
         for index, request in enumerate(requests):
             # Prompt-local memory: every request sees the ones dispatched
-            # before it in the same prompt (their kind, utterance, payload
-            # and — for the ones already run — dispatch status). Sequential
-            # dispatch makes this exact; agents' LLMs use it to resolve
-            # pronouns ("ingest meow.pdf, then summarize it" — it = meow.pdf).
+            # before it in the same prompt (their kind, utterance and — for
+            # the ones already run — dispatch outcome). Sequential dispatch
+            # makes this exact; LLM-based agents use it to compose their
+            # reply against what actually happened.
             self._attach_preceding(context, index, request, requests, outcome)
             try:
                 entry = self._dispatch(context, index, request)
             except Exception as exc:  # noqa: BLE001 — one bad request must
                 # never abort the batch; report and keep going.
                 logger.exception("Routing dispatch crashed on request %d", index)
-                kind = getattr(request, "kind", "?")
-                kind = getattr(kind, "value", str(kind))
+                kind = _kind_label(request)
                 entry = RequestOutcome(
                     kind=kind,
                     utterance=str(getattr(request, "utterance", "")),
@@ -143,28 +179,24 @@ class RoutingGraph:
     ) -> None:
         """Give ``request`` the entries of its same-prompt predecessors.
 
-        Payload (``document``/``question``) comes from the analyzer's
-        requests (that is where "it" resolves); status/detail come from
-        ``outcome.outcomes`` (the authoritative dispatch history) — the
-        analyzer cannot fabricate either side of the merge. Requests that
-        are not ``UserRequest`` instances (defensive: the graph tolerates
-        duck-typed objects) are skipped. Traced only when the batch
-        actually has a predecessor.
+        Utterances come from the analyzed requests (that is where "it"
+        resolves); status/detail come from ``outcome.outcomes`` (the
+        authoritative dispatch history) — the analyzer cannot fabricate
+        either side of the merge. Unknown request types (defensive) are
+        skipped. Traced only when the batch actually has a predecessor.
         """
-        if not isinstance(request, UserRequest):
+        if not isinstance(request, (IngestionRequest, RetrievalRequest, GeneralRequest)):
             return
         if index <= 0:
             return
         preceding: List[RequestContextEntry] = []
         for earlier, done in zip(requests[:index], outcome.outcomes[:index]):
-            if not isinstance(earlier, UserRequest):
+            if not isinstance(earlier, (IngestionRequest, RetrievalRequest, GeneralRequest)):
                 continue
             preceding.append(
                 RequestContextEntry(
-                    kind=earlier.kind.value,
-                    utterance=earlier.utterance,
-                    document=earlier.document,
-                    question=earlier.question,
+                    kind=_kind_label(earlier),
+                    utterance=earlier.utterance or _request_display(earlier),
                     status=done.status,
                     detail=done.detail,
                 )
@@ -177,44 +209,36 @@ class RoutingGraph:
         )
 
     def _dispatch(self, context: RoutingContext, index: int, request: object) -> RequestOutcome:
-        """Hand one request to its kind's agent (or report not-implemented)."""
-        kind = getattr(request, "kind", None)
-        kind_value = getattr(kind, "value", str(kind))
+        """Hand one request to its kind's agent (or gate/reject it)."""
+        kind_value = _kind_label(request)
         utterance = str(getattr(request, "utterance", ""))
 
-        agent_key = TASK_AGENT_KEYS.get(str(kind_value))
+        if isinstance(request, IngestionRequest):
+            # Deterministic gate BEFORE any agent runs: an ingestion request
+            # whose origin cannot be decided is set aside — not ingested —
+            # and the batch continues. An unverified origin must never
+            # reach storage silently.
+            gate = _decide_origin_gate(request)
+            if gate is not None:
+                context.emit("dispatch", "origin_set_aside", gate[1], index=index,
+                             document=request.document)
+                return RequestOutcome(
+                    kind=kind_value,
+                    utterance=utterance,
+                    status=STATUS_SET_ASIDE,
+                    detail=gate[1],
+                    payload={"document": request.document, "question": gate[0]},
+                )
+
+        agent_key = TASK_AGENT_KEYS.get(kind_value)
         if agent_key is None:
             context.emit("dispatch", "unknown_kind",
                          f"unknown request kind: {kind_value!r}", index=index)
             return RequestOutcome(
-                kind=str(kind_value),
+                kind=kind_value,
                 utterance=utterance,
                 status=STATUS_REJECTED,
                 detail=f"unknown request kind: {kind_value!r}",
-            )
-
-        # Per-request degradation, checked before agent availability: an
-        # ingestion request without a document is valid-but-underspecified
-        # (the analyzer must not invent file names). Asking the user takes
-        # precedence over announcing a missing agent — the request stays
-        # unresolvable either way, but the user can fix it by naming a file.
-        if (
-            str(kind_value) == "ingestion"
-            and not str(getattr(request, "document", "") or "").strip()
-        ):
-            context.emit(
-                "dispatch", "incomplete_request",
-                "ingestion request without a document: asking the user",
-                index=index,
-            )
-            return RequestOutcome(
-                kind=str(kind_value),
-                utterance=utterance,
-                status=STATUS_INCOMPLETE,
-                detail=(
-                    "which document should be ingested? Name the file "
-                    "you want ingested (e.g. 'ingest Dumas.pdf')."
-                ),
             )
 
         agent = self._agents.get(agent_key)
@@ -222,7 +246,7 @@ class RoutingGraph:
             context.emit("dispatch", "not_implemented",
                          f"no agent for kind '{kind_value}' yet", index=index)
             return RequestOutcome(
-                kind=str(kind_value),
+                kind=kind_value,
                 utterance=utterance,
                 status=STATUS_NOT_IMPLEMENTED,
                 detail=f"no agent implemented for kind '{kind_value}' yet",
@@ -253,9 +277,96 @@ class RoutingGraph:
             detail = result.detail or result.status.value
 
         return RequestOutcome(
-            kind=str(kind_value),
+            kind=kind_value,
             utterance=utterance,
             status=status,
             detail=detail,
             payload=payload,
         )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic origin gate (before any agent runs)
+# ---------------------------------------------------------------------------
+
+def _request_display(request: object) -> str:
+    """Short human-readable text of a request for memory entries/logs."""
+    if isinstance(request, IngestionRequest):
+        return f"ingest {request.document}"
+    if isinstance(request, RetrievalRequest):
+        return request.question
+    if isinstance(request, GeneralRequest):
+        return request.question
+    return str(getattr(request, "utterance", type(request).__name__))
+
+
+def _decide_origin_gate(request: IngestionRequest) -> Optional[tuple]:
+    """Deterministic origin decision for one ingestion request.
+
+    Precedence (the established one, now in the dispatch path):
+    user-stated > stored (canonical JSON) > confident filename inference.
+    Returns ``None`` when the origin is decided (or decidable) — dispatch
+    proceeds — or ``(question_text, explanation)`` when the request must
+    be SET ASIDE: not ingested, batch continues, user notified at the end.
+
+    Fail-open: a store/facts problem counts as "cannot decide" — the
+    document is set aside rather than ingested with a guessed origin.
+    """
+    if request.origin:
+        return None  # user-stated wins, always
+    try:
+        from src.tools.ingest_tool import ingest_document
+
+        resolution = ingest_document(request.document)
+        if resolution.get("status") not in ("ready", "ingested"):
+            return None  # not found: the agent reports candidates itself
+        path = Path(str(resolution["path"]))
+    except Exception:  # noqa: BLE001 — fail-open: cannot decide
+        return (
+            "which origin does this document have?",
+            f"could not check the state of '{request.document}': the "
+            "document was set aside rather than ingested with an "
+            "unverified origin",
+        )
+
+    # Stored origin: the origin decided at the document's first ingestion
+    # (canonical JSON). Re-ingestion keeps it.
+    try:
+        from src.helpers.document_extract_json_store import (
+            canonical_path_for,
+            load_extract,
+        )
+
+        canonical = canonical_path_for(path)
+        if canonical.exists():
+            stored = load_extract(canonical)
+            stored_origin = (
+                stored.origin.value if getattr(stored, "origin", None) else None
+            )
+            if stored_origin:
+                return None  # known: re-ingestion keeps the stored origin
+    except Exception:  # noqa: BLE001 — advisory fact only
+        pass
+
+    # Confident filename inference (deterministic, auditable).
+    try:
+        from src.ingestion.ingestion_router import infer_origin
+
+        if infer_origin(request.document) is not None:
+            return None
+    except Exception:  # noqa: BLE001 — advisory only
+        pass
+
+    return (
+        (
+            f"which origin does '{request.document}' have? Phrase it as: "
+            f"\"ingest {request.document}, it is a canon document\" / "
+            f"\"... it is a community document\" / \"... it is an rpg "
+            "document (my own content)\"."
+        ),
+        (
+            f"origin of '{request.document}' is unknown (unstated, not "
+            "stored, not inferable from the name): set aside — not "
+            "ingested"
+        ),
+    )

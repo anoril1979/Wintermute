@@ -5,11 +5,13 @@ from __future__ import annotations
 import unittest
 
 from src.agents.contexts import RoutingContext
-from src.agents.agents.ingestion_task_agent import IngestionTaskAgent
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
-from src.routing import RequestKind
-from src.routing.models import AnalysisResult, UserRequest
-from src.routing.request_analyzer import RequestAnalysisError, RequestAnalyzer
+from src.routing.models import (
+    AnalysisResult,
+    GeneralRequest,
+    IngestionRequest,
+)
+from src.routing.request_analyzer import RequestAnalysisError
 from src.routing.routing_orchestrator import (
     STATUS_ANALYSIS_ERROR,
     STATUS_HANDLED,
@@ -22,22 +24,23 @@ from src.tools.config_loader import ConfigError
 class FakeAnalyzer:
     """Deterministic analyzer for orchestrator tests."""
 
-    def __init__(self, requests=None, error: RequestAnalysisError | None = None):
-        self.requests = requests or []
+    def __init__(self, result: AnalysisResult | None = None,
+                 error: RequestAnalysisError | None = None):
+        self.result = result or AnalysisResult()
         self.error = error
 
     def analyze(self, prompt):
         if self.error is not None:
             raise self.error
-        return AnalysisResult(requests=self.requests)
+        return self.result
 
 
-def _ingestion(document="a.pdf"):
-    return UserRequest(kind=RequestKind.INGESTION, utterance="ingest a.pdf", document=document)
+def _ingestion_result(document="a.pdf"):
+    return AnalysisResult(ingestion=[IngestionRequest(document=document)])
 
 
-def _general():
-    return UserRequest(kind=RequestKind.GENERAL, utterance="hello")
+def _general_result():
+    return AnalysisResult(general=[GeneralRequest(question="hello")])
 
 
 class OkTaskAgent:
@@ -53,26 +56,30 @@ class OkTaskAgent:
 class RunRoutingTest(unittest.TestCase):
     def test_handled_when_an_agent_answers(self):
         result = run_routing(
-            "anything", analyzer=FakeAnalyzer([_general()]),
+            "anything", analyzer=FakeAnalyzer(_general_result()),
             agents={"general_task": OkTaskAgent()},
         )
         self.assertEqual(result["status"], STATUS_HANDLED)
         self.assertEqual(result["results"][0]["status"], "done")
 
     def test_partial_when_nothing_reached_an_agent(self):
-        result = run_routing("anything", analyzer=FakeAnalyzer([_general()]), agents={})
+        result = run_routing(
+            "anything", analyzer=FakeAnalyzer(_general_result()), agents={},
+        )
         self.assertEqual(result["status"], STATUS_PARTIAL)
         self.assertEqual(result["results"][0]["status"], "not_implemented")
 
     def test_empty_analysis_is_partial(self):
-        result = run_routing("anything", analyzer=FakeAnalyzer([]), agents={})
+        result = run_routing("anything", analyzer=FakeAnalyzer(), agents={})
         self.assertEqual(result["status"], STATUS_PARTIAL)
         self.assertEqual(result["results"], [])
 
     def test_analysis_error_llm_request(self):
         result = run_routing(
             "anything",
-            analyzer=FakeAnalyzer(error=RequestAnalysisError("down", cause="llm_request")),
+            analyzer=FakeAnalyzer(
+                error=RequestAnalysisError("down", cause="llm_request")
+            ),
             agents={},
         )
         self.assertEqual(result["status"], STATUS_ANALYSIS_ERROR)
@@ -81,7 +88,9 @@ class RunRoutingTest(unittest.TestCase):
     def test_analysis_error_llm_response(self):
         result = run_routing(
             "anything",
-            analyzer=FakeAnalyzer(error=RequestAnalysisError("bad", cause="llm_response")),
+            analyzer=FakeAnalyzer(
+                error=RequestAnalysisError("bad", cause="llm_response")
+            ),
             agents={},
         )
         self.assertEqual(result["status"], STATUS_ANALYSIS_ERROR)
@@ -94,9 +103,28 @@ class RunRoutingTest(unittest.TestCase):
             "src.routing.routing_orchestrator.build_default_task_agents",
             side_effect=ConfigError("missing role"),
         ):
-            result = run_routing("anything", analyzer=FakeAnalyzer([_ingestion()]), agents=None)
+            result = run_routing(
+                "anything", analyzer=FakeAnalyzer(_ingestion_result()), agents=None
+            )
         self.assertEqual(result["status"], STATUS_ANALYSIS_ERROR)
         self.assertEqual(result["cause"], "config")
+
+    def test_grouped_metadata_in_traces(self):
+        result = run_routing(
+            "anything",
+            analyzer=FakeAnalyzer(AnalysisResult(
+                ingestion=[IngestionRequest(document="a.pdf")],
+                general=[GeneralRequest(question="hi")],
+            )),
+            agents={},
+        )
+        understood = [
+            e for e in result["traces"]
+            if e.get("phase") == "analysis" and e.get("kind") == "understood"
+        ]
+        self.assertEqual(len(understood), 1)
+        self.assertEqual(understood[0]["data"]["groups"],
+                         {"ingestion": 1, "retrieval": 0, "general": 1})
 
 
 if __name__ == "__main__":

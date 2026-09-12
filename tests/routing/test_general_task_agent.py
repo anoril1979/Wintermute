@@ -15,18 +15,18 @@ from src.agents.agents.general_task_agent import GeneralTaskAgent
 from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentStatus, FailureDomain
 from src.routing.models import (
+    GeneralRequest,
+    IngestionRequest,
     RequestContextEntry,
-    RequestKind,
-    UserRequest,
 )
 
 
 def _general(utterance="What color is the sky over the Sprawl?"):
-    return UserRequest(kind=RequestKind.GENERAL, utterance=utterance)
+    return GeneralRequest(utterance=utterance, question=utterance)
 
 
 def _ingestion():
-    return UserRequest(kind=RequestKind.INGESTION, utterance="u", document="a.pdf")
+    return IngestionRequest(utterance="u", document="a.pdf")
 
 
 class _FakeLLM:
@@ -57,14 +57,14 @@ class GeneralTaskAgentTest(unittest.TestCase):
         kinds = [e["kind"] for e in self.context.events if e["phase"] == "task"]
         self.assertEqual(kinds, ["general_start", "general_done"])
 
-    def test_prompt_carries_persona_and_utterance(self):
+    def test_prompt_carries_persona_and_question(self):
         llm = _FakeLLM()
         _agent(llm).run(self.context, _general("hello there"))
         self.assertEqual(len(llm.prompts), 1)
         prompt = llm.prompts[0]
         self.assertIn("Wintermute", prompt)          # persona instructions
         self.assertIn("<<<<PROMPT>>>>", prompt)      # delimiter convention
-        self.assertIn("hello there", prompt)         # the utterance, verbatim
+        self.assertIn("hello there", prompt)         # the question, verbatim
 
     def test_llm_failure_maps_to_llm_response_domain(self):
         class DownLLM:
@@ -139,13 +139,13 @@ class PromptLocalMemoryTest(unittest.TestCase):
 
     def test_preceding_rendered_before_utterance(self):
         llm = _FakeLLM()
-        request = UserRequest(
-            kind=RequestKind.GENERAL,
+        request = GeneralRequest(
             utterance="so, is it safe?",
+            question="so, is it safe?",
             preceding=[
                 RequestContextEntry(
                     kind="ingestion", utterance="ingest meow.pdf",
-                    document="meow.pdf", status="done",
+                    status="done",
                 ),
                 RequestContextEntry(
                     kind="general", utterance="thanks!", status="rejected",
@@ -168,13 +168,13 @@ class PromptLocalMemoryTest(unittest.TestCase):
             prompt.index("User request:\n"),
         )
 
-    def test_preceding_document_available_for_pronoun_resolution(self):
+    def test_preceding_utterance_available_for_pronoun_resolution(self):
         llm = _FakeLLM()
-        request = UserRequest(
-            kind=RequestKind.GENERAL, utterance="is it indexed?",
+        request = GeneralRequest(
+            utterance="is it indexed?", question="is it indexed?",
             preceding=[RequestContextEntry(
                 kind="ingestion", utterance="ingest meow.pdf",
-                document="meow.pdf", status="done",
+                status="done",
             )],
         )
         _agent(llm).run(self.context, request)

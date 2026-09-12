@@ -14,7 +14,12 @@ from src.agents.agents.ingestion_task_agent import IngestionTaskAgent
 from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.graphs import RoutingGraph
-from src.routing.models import AnalysisResult, RequestKind, UserRequest
+from src.routing.models import (
+    AnalysisResult,
+    GeneralRequest,
+    IngestionRequest,
+    RetrievalRequest,
+)
 
 
 class FakeAnalyzer:
@@ -22,15 +27,21 @@ class FakeAnalyzer:
         self.requests = requests
 
     def analyze(self, prompt):
-        return AnalysisResult(requests=self.requests)
+        result = AnalysisResult()
+        for request in self.requests:
+            if isinstance(request, IngestionRequest):
+                result.ingestion.append(request)
+            else:
+                result.general.append(request)
+        return result
 
 
 def _ingestion(document="a.pdf"):
-    return UserRequest(kind=RequestKind.INGESTION, utterance="ingest it", document=document)
+    return IngestionRequest(utterance="ingest it", document=document)
 
 
 def _general(utterance="hello"):
-    return UserRequest(kind=RequestKind.GENERAL, utterance=utterance)
+    return GeneralRequest(utterance=utterance, question=utterance)
 
 
 class OkAgent:
@@ -74,7 +85,7 @@ class OrchestratorTracesTest(unittest.TestCase):
     def test_traces_returned_and_ordered(self):
         result = routing_orchestrator_module.run_routing(
             "anything",
-            analyzer=FakeAnalyzer([_ingestion(), _general()]),
+            analyzer=FakeAnalyzer(requests=[_ingestion(), _general()]),
             agents={"ingestion_task": OkAgent()},
         )
         self.assertEqual(result["status"], "handled")
@@ -103,7 +114,7 @@ class OrchestratorTracesTest(unittest.TestCase):
         live = []
         result = routing_orchestrator_module.run_routing(
             "anything",
-            analyzer=FakeAnalyzer([_general()]),
+            analyzer=FakeAnalyzer(requests=[_general()]),
             agents={"general_task": OkAgent()},
             on_event=live.append,
         )
@@ -130,9 +141,9 @@ class PromptLocalMemoryTest(unittest.TestCase):
         graph.run(RoutingContext(request="x"), requests)
         self.assertEqual(requests[0].preceding, [])
 
-    def test_preceding_carries_payload_and_outcome(self):
+    def test_preceding_carries_utterance_and_outcome(self):
         # "ingest a.pdf, then <general about it>": the general request must
-        # see the ingestion's file name AND its dispatch outcome.
+        # see the ingestion's utterance AND its dispatch outcome.
         requests = [_ingestion("a.pdf"), _general("is it indexed?")]
         graph = RoutingGraph(agents={
             "ingestion_task": OkAgent(),
@@ -141,7 +152,7 @@ class PromptLocalMemoryTest(unittest.TestCase):
         graph.run(RoutingContext(request="x"), requests)
         entry = requests[1].preceding[0]
         self.assertEqual(entry.kind, "ingestion")
-        self.assertEqual(entry.document, "a.pdf")
+        self.assertEqual(entry.utterance, "ingest it")
         self.assertEqual(entry.status, "done")
         self.assertEqual(entry.detail, "done")
 
@@ -183,9 +194,13 @@ class PromptLocalMemoryTest(unittest.TestCase):
 class AgentTraceTest(unittest.TestCase):
     def test_ingestion_agent_emits_task_traces(self):
         context = RoutingContext(request="x")
-        agent = IngestionTaskAgent(runner=lambda path, force=False, **kw: {"status": "accepted"})
-        with unittest.mock.patch("src.tools.ingest_tool.ingest_document",
-                                 return_value={"status": "ready", "path": "x/a.pdf"}):
+        agent = IngestionTaskAgent(
+            runner=lambda path, force=False, **kw: {"status": "accepted"}
+        )
+        with unittest.mock.patch(
+            "src.tools.ingest_tool.ingest_document",
+            return_value={"status": "ready", "path": "x/a.pdf"},
+        ):
             agent.run(context, _ingestion())
         kinds = [t["kind"] for t in context.events if t["phase"] == "task"]
         self.assertEqual(kinds, ["ingestion_start", "ingestion_done"])
@@ -193,8 +208,10 @@ class AgentTraceTest(unittest.TestCase):
     def test_refused_document_emits_refusal_trace(self):
         context = RoutingContext(request="x")
         agent = IngestionTaskAgent(runner=lambda path, force=False, **kw: {})
-        with unittest.mock.patch("src.tools.ingest_tool.ingest_document",
-                                 return_value={"status": "no_file", "message": "nope"}):
+        with unittest.mock.patch(
+            "src.tools.ingest_tool.ingest_document",
+            return_value={"status": "no_file", "message": "nope"},
+        ):
             agent.run(context, _ingestion())
         kinds = [t["kind"] for t in context.events if t["phase"] == "task"]
         self.assertEqual(kinds, ["ingestion_refused"])
@@ -219,7 +236,9 @@ class StreamingWireTest(unittest.TestCase):
 
     def test_sse_thinking_then_content_then_done(self):
         # run_routing builds RequestAnalyzer() itself: patch with a factory.
-        routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer([_ingestion()])
+        routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer(
+            requests=[_ingestion()]
+        )
         with self._patch_tool(["A.pdf"]):
             response = self.client.post(
                 "/v1/chat/completions",
@@ -240,7 +259,9 @@ class StreamingWireTest(unittest.TestCase):
         self.assertIn("[dispatch] dispatching", thinking)
 
     def test_ndjson_thinking_then_content_then_done(self):
-        routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer([_ingestion()])
+        routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer(
+            requests=[_ingestion()]
+        )
         with self._patch_tool(["A.pdf"]):
             response = self.client.post(
                 "/api/chat",
@@ -261,9 +282,11 @@ class StreamingWireTest(unittest.TestCase):
         self.assertIn("[analysis] understood", thinking)
 
     def test_non_streaming_has_no_thinking_field(self):
-        routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer([_general()])
+        routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer(
+            requests=[_general()]
+        )
         # Hermetic: a stub agent answers the general request (the default
-        # registry would build the real GeneralTaskAgent → live Ollama).
+        # registry would build the real GeneralTaskAgent -> live Ollama).
         with unittest.mock.patch(
             "src.routing.routing_orchestrator.build_default_task_agents",
             return_value={"general_task": OkAgent()},

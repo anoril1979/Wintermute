@@ -5,13 +5,19 @@ from __future__ import annotations
 import json
 import unittest
 
-from src.routing import models as routing_models
-from src.routing.models import AnalysisResult, RequestKind
+from src.routing.models import AnalysisResult
 from src.routing.request_analyzer import (
     ANALYSIS_PROMPT_PATH,
     RequestAnalysisError,
     RequestAnalyzer,
 )
+
+
+def _empty_answer() -> str:
+    return json.dumps({
+        "ingestion": [], "retrieval": [], "general": [],
+        "force": False, "redo_summaries": False, "origin": None,
+    })
 
 
 class FakeLLM:
@@ -28,18 +34,20 @@ class FakeLLM:
 
 
 class AnalyzerTest(unittest.TestCase):
-    def test_analyzes_prompt_into_requests(self):
-        answer = json.dumps({"requests": [
-            {"kind": "ingestion", "utterance": "ingest a.pdf", "document": "a.pdf"},
-            {"kind": "retrieval", "utterance": "who?", "question": "Who?"},
-        ]})
+    def test_analyzes_prompt_into_grouped_requests(self):
+        answer = json.dumps({
+            "ingestion": [{"document": "a.pdf", "utterance": "ingest a.pdf"}],
+            "retrieval": [{"question": "Who?", "utterance": "who?"}],
+            "general": [],
+            "force": False, "redo_summaries": False, "origin": None,
+        })
         llm = FakeLLM(answer)
         analyzer = RequestAnalyzer()
         analyzer._llm = lambda: llm
 
         result = analyzer.analyze("ingest a.pdf then who?")
-        self.assertEqual([r.kind for r in result.requests],
-                         [RequestKind.INGESTION, RequestKind.RETRIEVAL])
+        self.assertEqual(len(result.ingestion), 1)
+        self.assertEqual(len(result.retrieval), 1)
         # The user prompt must travel inside the LLM prompt...
         self.assertIn("ingest a.pdf then who?", llm.calls[0]["prompt"])
         # ...after the analysis instructions...
@@ -54,7 +62,7 @@ class AnalyzerTest(unittest.TestCase):
         analyzer = RequestAnalyzer()
         analyzer._llm = lambda: llm
         result = analyzer.analyze("   ")
-        self.assertEqual(result.requests, [])
+        self.assertEqual(result.request_count, 0)
         self.assertEqual(llm.calls, [])
 
     def test_llm_failure_maps_to_llm_request_cause(self):
@@ -71,17 +79,69 @@ class AnalyzerTest(unittest.TestCase):
             analyzer.analyze("hello")
         self.assertEqual(ctx.exception.cause, "llm_response")
 
-    def test_documentless_ingestion_answer_is_valid_incomplete(self):
-        # Fix A: an ingestion request without a document is valid-but-
-        # incomplete (the analyzer must not invent file names); the routing
-        # graph degrades it per request instead of failing the batch.
+    def test_ingestion_request_carries_stated_origin(self):
+        answer = json.dumps({
+            "ingestion": [{
+                "document": "a.pdf", "origin": "rpg",
+                "utterance": "ingest my a.pdf",
+            }],
+            "retrieval": [], "general": [],
+            "force": False, "redo_summaries": False, "origin": None,
+        })
         analyzer = RequestAnalyzer()
-        analyzer._llm = lambda: FakeLLM(json.dumps(
-            {"requests": [{"kind": "ingestion", "utterance": "x"}]}  # no document
-        ))
-        result = analyzer.analyze("hello")
-        self.assertEqual(len(result.requests), 1)
-        self.assertIsNone(result.requests[0].document)
+        analyzer._llm = lambda: FakeLLM(answer)
+        result = analyzer.analyze("ingest my a.pdf, it is my own content")
+        self.assertEqual(result.ingestion[0].origin, "rpg")
+
+    def test_analyzer_does_not_guess_origin(self):
+        answer = json.dumps({
+            "ingestion": [{"document": "gazette.pdf", "utterance": "Ingest gazette.pdf"}],
+            "retrieval": [], "general": [],
+            "force": False, "redo_summaries": False, "origin": None,
+        })
+        analyzer = RequestAnalyzer()
+        analyzer._llm = lambda: FakeLLM(answer)
+        result = analyzer.analyze("ingest gazette.pdf")
+        self.assertIsNone(result.ingestion[0].origin)
+
+    def test_unresolvable_ingestion_becomes_general(self):
+        # The analyzer must not invent a document: "ingest some documents"
+        # yields NO ingestion request — the text goes to the general agent,
+        # which asks the user for a file name.
+        answer = json.dumps({
+            "ingestion": [], "retrieval": [],
+            "general": [{
+                "question": "I would like you to ingest some documents",
+                "utterance": "I would like you to ingest some documents",
+            }],
+            "force": False, "redo_summaries": False, "origin": None,
+        })
+        analyzer = RequestAnalyzer()
+        analyzer._llm = lambda: FakeLLM(answer)
+        result = analyzer.analyze(
+            "I would like you to ingest some documents"
+        )
+        self.assertEqual(result.ingestion, [])
+        self.assertEqual(len(result.general), 1)
+
+    def test_retrieval_question_classification(self):
+        answer = json.dumps({
+            "ingestion": [], "retrieval": [
+                {"question": "Who is the King of the North",
+                 "lookup_kind": "semantic", "utterance": "Who is the King of the North?"},
+                {"question": "family tree of the King of the North",
+                 "lookup_kind": "relation", "utterance": "especially his family tree"},
+            ],
+            "general": [],
+            "force": False, "redo_summaries": False, "origin": None,
+        })
+        analyzer = RequestAnalyzer()
+        analyzer._llm = lambda: FakeLLM(answer)
+        result = analyzer.analyze(
+            "Who is the King of the North? Especially his family tree."
+        )
+        self.assertEqual(len(result.retrieval), 2)
+        self.assertEqual(result.retrieval[1].lookup_kind.value, "relation")
 
 
 if __name__ == "__main__":

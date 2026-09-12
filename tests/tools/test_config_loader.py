@@ -6,7 +6,10 @@ import unittest
 
 from src.tools.config_loader import (
     IngestionConfigError,
+    RetrievalConfigError,
+    load_retrieval_config,
     validate_ingestion_config,
+    validate_retrieval_config,
 )
 
 
@@ -174,6 +177,80 @@ class NonMappingDocumentTest(unittest.TestCase):
         with self.assertRaises(IngestionConfigError) as ctx:
             validate_ingestion_config(["documents_root", "extensions"])
         self.assertIn("mapping", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# retrieval.yaml validation
+# ---------------------------------------------------------------------------
+
+class RetrievalConfigValidationTest(unittest.TestCase):
+    def _valid_config(self) -> dict:
+        return {
+            "default_top_k": 6,
+            "max_top_k": 20,
+            "min_score": 0.35,
+            "embedding_role": "embedding",
+            "source_collection_key": "source_chunks",
+        }
+
+    def test_valid_config_roundtrip(self):
+        config = self._valid_config()
+        self.assertIs(validate_retrieval_config(config), config)
+
+    def test_non_mapping_document_is_rejected(self):
+        with self.assertRaises(RetrievalConfigError):
+            validate_retrieval_config(["default_top_k"])
+
+    def test_missing_required_key_is_rejected(self):
+        for key in ("default_top_k", "max_top_k", "min_score",
+                    "embedding_role", "source_collection_key"):
+            config = self._valid_config()
+            del config[key]
+            with self.assertRaises(RetrievalConfigError, msg=key):
+                validate_retrieval_config(config)
+
+    def test_non_positive_top_k_is_rejected(self):
+        config = self._valid_config()
+        config["default_top_k"] = 0
+        with self.assertRaises(RetrievalConfigError) as ctx:
+            validate_retrieval_config(config)
+        self.assertIn("'default_top_k'", str(ctx.exception))
+
+    def test_bool_top_k_is_rejected(self):
+        config = self._valid_config()
+        config["max_top_k"] = True
+        with self.assertRaises(RetrievalConfigError):
+            validate_retrieval_config(config)
+
+    def test_default_top_k_above_max_is_rejected(self):
+        config = self._valid_config()
+        config["default_top_k"] = 50
+        with self.assertRaises(RetrievalConfigError) as ctx:
+            validate_retrieval_config(config)
+        self.assertIn("max_top_k", str(ctx.exception))
+
+    def test_min_score_out_of_range_is_rejected(self):
+        config = self._valid_config()
+        config["min_score"] = 1.5
+        with self.assertRaises(RetrievalConfigError):
+            validate_retrieval_config(config)
+        config["min_score"] = "high"
+        with self.assertRaises(RetrievalConfigError):
+            validate_retrieval_config(config)
+
+    def test_unknown_embedding_role_is_rejected(self):
+        """Cross-file consistency: the role must exist in llm.yaml."""
+        config = self._valid_config()
+        config["embedding_role"] = "no_such_role"
+        with self.assertRaises(RetrievalConfigError) as ctx:
+            validate_retrieval_config(config)
+        self.assertIn("llm.yaml", str(ctx.exception))
+
+    def test_real_retrieval_yaml_loads(self):
+        """The shipped retrieval.yaml must pass its own validation."""
+        config = load_retrieval_config()
+        self.assertGreater(config["default_top_k"], 0)
+        self.assertGreaterEqual(config["max_top_k"], config["default_top_k"])
 
 
 if __name__ == "__main__":

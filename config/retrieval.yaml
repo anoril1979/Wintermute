@@ -1,0 +1,33 @@
+# ============================================================
+# retrieval.yaml — Retrieval configuration
+# Tuning knobs of the retrieval orchestrator and its agents.
+# Storage-specific paths/collections do NOT live here: the
+# vector store folder and collection names belong to
+# setup.yaml (vector_db section) — retrieval only refers to
+# them by key.
+# ============================================================
+
+# Number of chunks fetched per semantic query (the "k" of top-k).
+# The retrieval intent may override it per request, within max_top_k.
+default_top_k: 6
+
+# Hard ceiling for a per-request top_k: a user (or a malformed LLM
+# answer) asking for 500 chunks must not flood the answerer's context.
+max_top_k: 20
+
+# Minimum cosine similarity (ChromaDB returns a distance; the client
+# converts it to similarity = 1 - distance) for a hit to be kept.
+# Cosine distance for these embedding models: <0.35 similarity is noise.
+# NOTE: the dimension/metric of a collection is frozen by its first write
+# (setup.yaml note) — retuning this only affects the filter, not the data.
+min_score: 0.35
+
+# The llm.yaml role that provides the QUERY embeddings. It MUST be the
+# same model that embedded the corpus (the "embedding" role) — embedding
+# the question with another model would compare incomparable vectors.
+embedding_role: "embedding"
+
+# The vector_db.collections key (setup.yaml) holding the source content
+# chunks indexed by the SourceIndexingAgent. Knowledge chunks get their
+# own key when the knowledge layer lands.
+source_collection_key: "source_chunks"

@@ -1,10 +1,11 @@
 """End-to-end: prompt-local memory across one user prompt's requests.
 
 The user asks several things in one prompt ("ingest meow.pdf, then tell
-me: is it indexed?"). The analyzer splits them; the routing graph
-dispatches them in order, attaching each request's predecessors; the
-task agent renders that local context into its LLM prompt. These tests
-run the whole flow with stubbed components — no live Ollama.
+me: is it indexed?"). The analyzer splits them into grouped scopes; the
+routing graph dispatches them in grouped order, attaching each request's
+predecessors; the task agent renders that local context into its LLM
+prompt. These tests run the whole flow with stubbed components — no live
+Ollama.
 """
 
 from __future__ import annotations
@@ -14,7 +15,11 @@ import unittest
 from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.graphs import RoutingGraph
-from src.routing.models import AnalysisResult, RequestKind, UserRequest
+from src.routing.models import (
+    AnalysisResult,
+    GeneralRequest,
+    IngestionRequest,
+)
 
 
 class FakeAnalyzer:
@@ -22,7 +27,13 @@ class FakeAnalyzer:
         self.requests = requests
 
     def analyze(self, prompt):
-        return AnalysisResult(requests=self.requests)
+        result = AnalysisResult()
+        for request in self.requests:
+            if isinstance(request, IngestionRequest):
+                result.ingestion.append(request)
+            else:
+                result.general.append(request)
+        return result
 
 
 class RecordingGeneralAgent:
@@ -62,9 +73,7 @@ class FailingIngestionAgent:
 
 
 def _ingestion(document):
-    return UserRequest(
-        kind=RequestKind.INGESTION, utterance=f"ingest {document}", document=document
-    )
+    return IngestionRequest(utterance=f"ingest {document}", document=document)
 
 
 class PromptLocalMemoryEndToEndTest(unittest.TestCase):
@@ -77,7 +86,7 @@ class PromptLocalMemoryEndToEndTest(unittest.TestCase):
         })
         requests = [
             _ingestion("meow.pdf"),
-            UserRequest(kind=RequestKind.GENERAL, utterance="is it indexed?"),
+            GeneralRequest(utterance="is it indexed?", question="is it indexed?"),
         ]
         outcome = graph.run(RoutingContext(request="p"), requests)
 
@@ -86,7 +95,7 @@ class PromptLocalMemoryEndToEndTest(unittest.TestCase):
         self.assertEqual(len(seen.preceding), 1)
         entry = seen.preceding[0]
         self.assertEqual(entry.kind, "ingestion")
-        self.assertEqual(entry.document, "meow.pdf")
+        self.assertEqual(entry.utterance, "ingest meow.pdf")
         self.assertEqual(entry.status, "rejected")  # the real outcome
         self.assertEqual(entry.detail, "ollama down")
 
@@ -102,8 +111,8 @@ class PromptLocalMemoryEndToEndTest(unittest.TestCase):
         requests = [
             _ingestion("a.pdf"),                                        # A
             _ingestion("b.pdf"),                                        # B
-            UserRequest(kind=RequestKind.GENERAL, utterance="do C"),    # C
-            UserRequest(kind=RequestKind.GENERAL, utterance="is D?"),   # D
+            GeneralRequest(utterance="do C", question="do C"),          # C
+            GeneralRequest(utterance="is D?", question="is D?"),        # D
         ]
         graph.run(RoutingContext(request="p"), requests)
 
@@ -119,12 +128,12 @@ class PromptLocalMemoryEndToEndTest(unittest.TestCase):
 
     def test_analyzer_never_sees_or_invents_context(self):
         """The analyzer prompt contract: it only splits; the graph owns memory."""
-        analyzer = FakeAnalyzer([
+        analyzer = FakeAnalyzer(requests=[
             _ingestion("meow.pdf"),
-            UserRequest(kind=RequestKind.GENERAL, utterance="is it indexed?"),
+            GeneralRequest(utterance="is it indexed?", question="is it indexed?"),
         ])
         result = analyzer.analyze("anything")
-        for request in result.requests:
+        for request in result.flattened():
             self.assertEqual(request.preceding, [])
 
 

@@ -343,8 +343,9 @@ def _compose_reply(results: list) -> tuple:
         if kind == "retrieval" and status == "not_implemented":
             needs_rag = True  # answered by the RAG chain instead
             continue
-        if status == "incomplete":
-            # Underspecified request: a question for the user, not a failure.
+        if status in ("incomplete", "set_aside"):
+            # Underspecified request (or origin the system refuses to
+            # guess): a question for the user, not a failure.
             lines.append(f"**More information needed**: {detail}")
             continue
         if status == "done":

@@ -19,6 +19,7 @@ from typing import Dict
 
 from src.agents.agents.general_task_agent import GeneralTaskAgent
 from src.agents.agents.ingestion_task_agent import IngestionTaskAgent
+from src.agents.agents.retrieval_task_agent import RetrievalTaskAgent
 from src.agents.task_protocols import TASK_AGENT_KEYS, UserTaskAgent
 
 
@@ -27,8 +28,15 @@ def build_default_task_agents() -> Dict[str, UserTaskAgent]:
 
     Only agents that actually exist are returned; request kinds whose key
     is absent are reported as ``not_implemented`` by the routing graph.
+
+    The GeneralTaskAgent is built with ``allow_missing_role=True`` (a
+    missing ``general_task`` role must not break the front door); the
+    retrieval and ingestion task agents keep strict wiring — a broken
+    retrieval/ingestion configuration is a real outage, surfaced as a
+    clean CONFIG-domain result the API phrases for the user.
     """
     return {
+        TASK_AGENT_KEYS["retrieval"]: RetrievalTaskAgent(),
         TASK_AGENT_KEYS["ingestion"]: IngestionTaskAgent(),
         TASK_AGENT_KEYS["general"]: GeneralTaskAgent(allow_missing_role=True),
     }

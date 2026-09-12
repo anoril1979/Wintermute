@@ -3,19 +3,26 @@
 The bridge between the routing layer and the ingestion pipeline:
 
     RoutingGraph
-        └─ IngestionTaskAgent.run(context, UserRequest(kind=ingestion))
+        └─ IngestionTaskAgent.run(context, IngestionRequest)
              ├─ resolve the document (sandboxed, via src/tools/ingest_tool)
              └─ src/ingestion/ingestion_orchestrator.run_ingestion_file(
                     path,
-                    force=request.options.force_reingest,
-                    force_summarization=request.options.force_summarization)
+                    force=request.force,
+                    force_summarization=request.redo_summaries,
+                    origin=request.origin)
+
+The request arrives from the single analyzer with its intent already read
+(document, force, redo_summaries, stated origin); the agent resolves the
+file (sandboxed) and starts the orchestrator — deterministic Python all
+the way. The origin *decision* (stored / inferred / set-aside) was
+already gated by the routing graph before dispatch; a request that
+reaches this agent carries a decided origin (or none for a not-found
+document, whose resolution fails here anyway).
 
 The agent translates the structured request into an orchestrator call and
 maps the orchestrator's result dict onto the shared agent outcome
 vocabulary (AgentResult/FailureDomain); the orchestrator owns everything
-else (config gate, graph, extraction checkpoint). Request validation
-happened upstream (the analyzer produced a validated UserRequest), so the
-agent only defends against out-of-contract inputs.
+else (config gate, graph, extraction checkpoint).
 
 Failure mapping (never raises for expected failures):
 
@@ -36,6 +43,7 @@ from typing import Any, Callable, Dict, Optional
 
 from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
+from src.routing.models import IngestionRequest
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +99,9 @@ class IngestionTaskAgent:
             )
 
         path = Path(str(resolution["path"]))
-        force = bool(request.option("force_reingest", False))  # type: ignore[union-attr]
-        force_summarization = bool(request.option("force_summarization", False))  # type: ignore[union-attr]
+        force = bool(request.force)
+        force_summarization = bool(request.redo_summaries)
+        origin = request.origin
 
         # -- orchestrate --------------------------------------------------------
         context.emit("task", "ingestion_start",
@@ -104,6 +113,7 @@ class IngestionTaskAgent:
         result = self._run_ingestion(
             path, force=force,
             force_summarization=force_summarization,
+            origin=origin,
             on_event=context.on_event,
         )
 
@@ -169,23 +179,14 @@ class IngestionTaskAgent:
     @staticmethod
     def _extract_document(request: object) -> Any:
         """Pull the bare document name from the request (guarded)."""
-        if not hasattr(request, "kind") or not hasattr(request, "document"):
+        if not isinstance(request, IngestionRequest):
             return AgentResult(
                 agent_name=AGENT_NAME,
                 status=AgentStatus.FAILED,
                 failure_domain=FailureDomain.INPUT_DATA,
-                detail="ingestion task expects a UserRequest",
+                detail="ingestion task expects an IngestionRequest",
             )
-        from src.routing.models import RequestKind
-
-        if request.kind is not RequestKind.INGESTION:  # type: ignore[union-attr]
-            return AgentResult(
-                agent_name=AGENT_NAME,
-                status=AgentStatus.FAILED,
-                failure_domain=FailureDomain.INPUT_DATA,
-                detail=f"kind '{request.kind}' is not ingestion",  # type: ignore[union-attr]
-            )
-        return request.document  # type: ignore[union-attr]
+        return request.document
 
     def _run_ingestion(
         self,
@@ -193,6 +194,7 @@ class IngestionTaskAgent:
         *,
         force: bool,
         force_summarization: bool = False,
+        origin: Optional[str] = None,
         on_event: Optional[object] = None,
     ) -> Dict[str, Any]:
         """Call the ingestion orchestrator (lazily imported / injectable).
@@ -209,6 +211,8 @@ class IngestionTaskAgent:
             "force": force,
             "force_summarization": force_summarization,
         }
+        if origin is not None:
+            kwargs["origin"] = origin
         if on_event is not None:
             kwargs["on_event"] = on_event
         return dict(self._runner(path, **kwargs))

@@ -6,10 +6,10 @@ orchestrator, test doubles — never on a concrete client. Concrete
 implementations live beside it (``chroma_client.py`` for the store,
 ``embedding_client.py`` for embeddings) and must satisfy these interfaces.
 
-Scope today: **storage**. Retrieval is stubbed on purpose (``NotImplementedError``
-with an actionable message) so the contract is visible and the future
-retrieval orchestrator has a shape to grow into — without pretending a
-query path exists before it does.
+Scope today: **storage + vector retrieval**. ``query_by_vector`` is the
+real query seam (the retrieval layer embeds the question, the store never
+does); text queries and ``delete_document`` remain honest stubs so no
+caller can silently depend on a path that does not exist.
 
 The ``runtime_checkable`` decorators allow ``isinstance(...)`` sanity checks
 (method presence only — they do not verify signatures).
@@ -76,7 +76,38 @@ class VectorStoreProtocol(Protocol):
         """
         ...
 
-    # -- Retrieval stubs (future step — see module docstring) ----------------
+    # -- Retrieval --------------------------------------------------------------
+
+    def query_by_vector(
+        self,
+        vector: Sequence[float],
+        top_k: int = 5,
+        where: Optional[dict] = None,
+    ) -> list[VectorChunk]:
+        """Nearest-neighbor search with a pre-computed query vector.
+
+        The vector-seam variant: the caller (SemanticRetrievalAgent) embeds
+        the question itself, so the store never embeds — same decoupling as
+        ``upsert``. Scores are filled on the returned chunks (cosine
+        similarity, higher is better).
+
+        Args:
+            vector: the query embedding (same model/dimension as the
+                collection's chunks).
+            top_k: number of neighbors to fetch (1..n).
+            where: optional ChromaDB metadata filter (see
+                ``src/retrieval/filters.py`` for building one).
+
+        Returns:
+            Chunks in descending similarity order, each with ``score``
+            filled. Fewer than ``top_k`` when the collection holds less.
+
+        Raises:
+            ValueError: empty vector or non-positive top_k.
+            VectorStoreUnavailableError: the store could not be opened.
+            VectorStoreError: the backend refused the query.
+        """
+        ...
 
     def query(
         self,
@@ -84,7 +115,12 @@ class VectorStoreProtocol(Protocol):
         top_k: int = 5,
         where: Optional[dict] = None,
     ) -> list[VectorChunk]:
-        """Semantic search (STUB — NotImplementedError until retrieval lands)."""
+        """Semantic search by text (STUB — NotImplementedError).
+
+        Text queries would force the store to embed (a store-embedded
+        coupling we deliberately avoid); the retrieval layer embeds the
+        question and calls :meth:`query_by_vector` instead.
+        """
         ...
 
     def count(self) -> int:

@@ -96,6 +96,25 @@ class IngestionContext(_EventEmitterMixin):
 
 
 @dataclass
+class RetrievalContext(_EventEmitterMixin):
+    """State carried through the retrieval graph for one question.
+
+    Attributes:
+        question:   The self-contained search query (produced by the
+                    routing analyzer; the pipeline is deterministic).
+        outputs:    Per-step results, keyed by step name (the retriever
+                    writes the hits here).
+        errors:     Non-fatal issues collected so far (step -> message).
+        metadata:   Free-form context (filters, top_k, decision...).
+    """
+
+    question: str = ""
+    outputs: Dict[str, Any] = field(default_factory=dict)
+    errors: Dict[str, str] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RoutingContext(_EventEmitterMixin):
     """State carried through the routing graph for one user message.
 

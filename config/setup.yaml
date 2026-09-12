@@ -19,6 +19,15 @@ ollama:
 # zéro (machines peu puissantes).
 reply_to_meta_request: true
 
+# Analyze-and-dispatch routing (src/routing): ONE LLM analysis explodes
+# each user prompt into structured requests grouped by scope (ingestion /
+# retrieval / general) and the dispatcher runs them deterministically
+# (ingestions first, then retrievals, then general). The cap bounds how
+# many requests a single prompt may yield: a confused analysis looping on
+# the split is rejected as a malformed answer, not executed.
+routing:
+  max_requests_per_prompt: 8
+
 logging:
   level: "INFO"
   format: "%(asctime)s - [%(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"

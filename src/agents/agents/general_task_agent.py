@@ -19,10 +19,10 @@ only wires the call:
 * the user's utterance is passed verbatim, delimited between
   ``<<<<PROMPT>>>>`` markers (the established prompt convention);
 * requests the user made **earlier in the same prompt** (prompt-local
-  memory, ``UserRequest.preceding``) are rendered before the utterance,
-  so pronouns like "it" or "the file above" resolve against the local
-  context and the agent can acknowledge earlier steps ("you asked me to
-  ingest a.pdf first — done — and now...");
+  memory, ``preceding`` — dispatcher-built) are rendered before the
+  utterance, so pronouns like "it" or "the file above" resolve against
+  the local context and the agent can acknowledge earlier steps ("you
+  asked me to ingest a.pdf first — done — and now...");
 * the answer is plain text — returned in ``payload["answer"]``, which the
   app API composes into the user-facing reply (``_compose_reply``) and
   which flows to the caller as-is, persona intact.
@@ -49,7 +49,7 @@ from typing import List, Optional
 from src.agents.contexts import RoutingContext
 from src.agents.llm_roles import LLMRoleAgent, MissingLLMRoleError
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
-from src.routing.models import RequestContextEntry, RequestKind
+from src.routing.models import GeneralRequest, RequestContextEntry
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,8 @@ class GeneralTaskAgent(LLMRoleAgent):
             )
 
         context.emit("task", "general_start",
-                     f"answering general request: {utterance[:80]}")
+                     f"answering general request: {utterance[:80]}",
+                     request="general question")
         local = self._local_context_block(getattr(request, "preceding", None) or [])
         try:
             answer = self.llm_client().complete(
@@ -174,22 +175,15 @@ class GeneralTaskAgent(LLMRoleAgent):
 
     @staticmethod
     def _extract_utterance(request: object):
-        """Pull the user utterance from the request (guarded)."""
-        if not hasattr(request, "kind") or not hasattr(request, "utterance"):
+        """Pull the user text from the request (guarded)."""
+        if not isinstance(request, GeneralRequest):
             return AgentResult(
                 agent_name=AGENT_NAME,
                 status=AgentStatus.FAILED,
                 failure_domain=FailureDomain.INPUT_DATA,
-                detail="general task expects a UserRequest",
+                detail="general task expects a GeneralRequest",
             )
-        if request.kind is not RequestKind.GENERAL:  # type: ignore[union-attr]
-            return AgentResult(
-                agent_name=AGENT_NAME,
-                status=AgentStatus.FAILED,
-                failure_domain=FailureDomain.INPUT_DATA,
-                detail=f"kind '{request.kind}' is not general",  # type: ignore[union-attr]
-            )
-        return request.utterance  # type: ignore[union-attr]
+        return request.question
 
     def _prompt_template_text(self) -> str:
         """Load (and cache) the persona prompt."""

@@ -16,7 +16,7 @@ from src.extraction.document_extractor import DocumentExtractor
 from src.extraction.mineru_pdf_extractor import MineruPDFExtractor
 from src.extraction.models import DocumentExtract
 from src.graphs import IngestionGraph
-from src.routing.models import AnalysisResult, RequestKind, UserRequest
+from src.routing.models import AnalysisResult, IngestionRequest
 from src.routing.routing_orchestrator import run_routing
 from src.tools.extraction_job_file import ExtractionJobFile
 
@@ -241,9 +241,11 @@ class OrchestratorPassThroughTest(unittest.TestCase):
 
             class FakeAnalyzer:
                 def analyze(self, prompt):
-                    return AnalysisResult(requests=[
-                        UserRequest(kind=RequestKind.INGESTION,
-                                    utterance="ingest", document="doc.pdf")
+                    return AnalysisResult(ingestion=[
+                        # origin stated: the deterministic origin gate
+                        # lets the request through to the task agent
+                        IngestionRequest(utterance="ingest", document="doc.pdf",
+                                         origin="rpg")
                     ])
 
             with unittest.mock.patch(

@@ -1,9 +1,9 @@
-"""Tests for the two graceful-degradation fixes.
+"""Tests for the two graceful-degradation fixes, on the grouped contract.
 
 Fix A — an ingestion request without a document no longer invalidates the
-whole analyzer batch (per-request degradation): the model keeps validating,
-the routing graph reports the request as ``incomplete`` and the API turns
-that into a question for the user.
+whole analyzer batch (per-request degradation): the degraded request is
+moved to ``general`` (the general agent asks the user to clarify) and the
+sibling requests survive.
 
 Fix B — an unanalyzable prompt produces an honest answer text instead of an
 HTTPException(503), which chat clients treated as a retryable failure and
@@ -15,6 +15,7 @@ is answered in place, never routed (see ``src/llm/guard.py``).
 
 from __future__ import annotations
 
+import json
 import unittest
 import unittest.mock
 
@@ -22,109 +23,102 @@ from fastapi.testclient import TestClient
 
 import app.api as api
 from src.llm import guard
-from src.graphs.routing_graph import (
-    STATUS_INCOMPLETE,
-    RoutingGraph,
-)
 from src.routing.request_analyzer import RequestAnalyzer
-from src.agents.contexts import RoutingContext
-from src.routing.models import AnalysisResult, RequestKind, UserRequest, parse_analysis
+from src.routing.models import parse_analysis
 
 
-class _StubTaskAgent:
-    """Minimal UserTaskAgent stand-in recording it was called."""
-
-    name = "stub"
-
-    def __init__(self) -> None:
-        self.calls: list = []
-
-    def run(self, context, request):
-        self.calls.append(request)
-        from src.agents.protocols import AgentResult, AgentStatus
-
-        return AgentResult(
-            agent_name=self.name,
-            status=AgentStatus.OK,
-            detail="handled",
-            payload={"answer": "stub answer"},
-        )
+def _raw(payload: dict) -> str:
+    return json.dumps(payload)
 
 
 class FixAIngestionWithoutDocumentTest(unittest.TestCase):
-    """Fix A: valid-but-incomplete ingestion requests degrade per request."""
+    """Fix A: a documentless ingestion request degrades per request."""
+
+    def test_documentless_ingestion_degrades_to_general(self):
+        raw = _raw({
+            "ingestion": [{"utterance": "ingest some documents"}],
+            "retrieval": [],
+            "general": [],
+        })
+        result = parse_analysis(raw)
+        self.assertEqual(len(result.ingestion), 0)
+        self.assertEqual(len(result.general), 1)
+        self.assertIn("ingest some documents", result.general[0].question)
 
     def test_documentless_ingestion_batch_still_parses_with_siblings(self):
         """The regression from the incident: one documentless ingestion must
         not destroy the general request that accompanied it."""
-        raw = (
-            '{"requests": ['
-            '{"kind": "ingestion", "utterance": "ingest some documents",'
-            ' "document": null, "question": null,'
-            ' "options": {"force_reingest": false, "section_scope": null}},'
-            '{"kind": "general", "utterance": "Hi Winter!"}'
-            "]}"
-        )
+        raw = _raw({
+            "ingestion": [{"utterance": "ingest some documents", "document": None}],
+            "retrieval": [],
+            "general": [{"question": "Hi Winter!", "utterance": "Hi Winter!"}],
+        })
         result = parse_analysis(raw)
-        self.assertEqual(len(result.requests), 2)
-        self.assertIsNone(result.requests[0].document)
-        self.assertEqual(result.requests[1].kind, RequestKind.GENERAL)
+        self.assertEqual(len(result.ingestion), 0)
+        self.assertEqual(len(result.general), 2)
+        # the degradation lands in the general list, next to the real
+        # general request that accompanied it (existing items first)
+        questions = [r.question for r in result.general]
+        self.assertEqual(questions, ["Hi Winter!", "ingest some documents"])
 
-    def test_graph_reports_incomplete_without_calling_the_agent(self):
-        agent = _StubTaskAgent()
-        graph = RoutingGraph(agents={"ingestion_task": agent})
-        context = RoutingContext()
+    def test_complete_ingestion_still_parses_normally(self):
+        raw = _raw({
+            "ingestion": [{"document": "Dumas.pdf", "utterance": "ingest Dumas.pdf"}],
+            "retrieval": [],
+            "general": [],
+        })
+        result = parse_analysis(raw)
+        self.assertEqual(len(result.ingestion), 1)
+        self.assertEqual(result.ingestion[0].document, "Dumas.pdf")
+        self.assertEqual(len(result.general), 0)
 
-        outcome = graph.run(
-            context,
-            [UserRequest(kind=RequestKind.INGESTION, utterance="ingest something")],
-        )
-
-        self.assertEqual(outcome.outcomes[0].status, STATUS_INCOMPLETE)
-        self.assertEqual(agent.calls, [])  # nothing was dispatched
-        self.assertIn("which document", outcome.outcomes[0].detail)
-
-    def test_complete_ingestion_still_dispatches_normally(self):
-        agent = _StubTaskAgent()
-        graph = RoutingGraph(agents={"ingestion_task": agent})
-        context = RoutingContext()
-
-        outcome = graph.run(
-            context,
-            [UserRequest(
-                kind=RequestKind.INGESTION,
-                utterance="ingest Dumas.pdf",
-                document="Dumas.pdf",
-            )],
-        )
-
-        self.assertEqual(outcome.outcomes[0].status, "done")
-        self.assertEqual(len(agent.calls), 1)
-
-    def test_compose_reply_turns_incomplete_into_a_question(self):
+    def test_compose_reply_turns_set_aside_into_a_question(self):
         text, needs_rag = api._compose_reply([
-            {"kind": "ingestion", "status": "incomplete",
-             "detail": "which document should be ingested?"},
+            {"kind": "ingestion", "status": "set_aside",
+             "detail": "origin of 'meow.pdf' is unknown: set aside — not ingested"},
         ])
         self.assertIn("More information needed", text)
-        self.assertIn("which document", text)
+        self.assertIn("meow.pdf", text)
         self.assertFalse(needs_rag)
 
-    def test_incomplete_does_not_poison_sibling_outcomes(self):
+    def test_set_aside_does_not_poison_sibling_outcomes(self):
+        from src.agents.contexts import RoutingContext
+        from src.graphs.routing_graph import STATUS_SET_ASIDE, RoutingGraph
+        from src.routing.models import GeneralRequest, IngestionRequest
+
+        class _StubTaskAgent:
+            name = "stub"
+
+            def run(self, context, request):
+                from src.agents.protocols import AgentResult, AgentStatus
+
+                return AgentResult(
+                    agent_name=self.name, status=AgentStatus.OK,
+                    detail="handled", payload={"answer": "stub answer"},
+                )
+
         agent = _StubTaskAgent()
         graph = RoutingGraph(agents={"general_task": agent})
-        context = RoutingContext()
-
-        outcome = graph.run(
-            context,
-            [
-                UserRequest(kind=RequestKind.INGESTION, utterance="ingest some documents"),
-                UserRequest(kind=RequestKind.GENERAL, utterance="Hi!"),
-            ],
-        )
+        with unittest.mock.patch(
+            "src.tools.ingest_tool.ingest_document",
+            return_value={"status": "ready", "path": "data/sources/pdf/zzz.pdf"},
+        ), unittest.mock.patch(
+            "src.helpers.document_extract_json_store.canonical_path_for",
+            return_value=unittest.mock.Mock(exists=lambda: False),
+        ), unittest.mock.patch(
+            "src.ingestion.ingestion_router.infer_origin",
+            return_value=None,
+        ):
+            outcome = graph.run(
+                RoutingContext(),
+                [
+                    IngestionRequest(document="zzz.pdf"),
+                    GeneralRequest(question="Hi!", utterance="Hi!"),
+                ],
+            )
 
         statuses = [o.status for o in outcome.outcomes]
-        self.assertEqual(statuses, [STATUS_INCOMPLETE, "done"])
+        self.assertEqual(statuses, [STATUS_SET_ASIDE, "done"])
 
 
 class FixBAnalysisErrorAnswerTest(unittest.TestCase):
@@ -181,8 +175,8 @@ class FixBAnalysisErrorAnswerTest(unittest.TestCase):
 
 
 class RagFallbackNeverRaisesTest(unittest.TestCase):
-    """The legacy RAG fallback (retrieval requests before RetrievalTaskAgent
-    exists) must also answer in-band instead of raising: any HTTPException
+    """The legacy RAG fallback (retrieval requests the task agent could not
+    serve) must also answer in-band instead of raising: any HTTPException
     there restarted the chat-client retry loop (third incident).
 
     ``run_routing`` is stubbed: these tests exercise the API's fallback
@@ -282,32 +276,29 @@ class FixCObservabilityTest(unittest.TestCase):
     def test_analyzer_logs_input_and_raw_answer(self):
         analyzer = RequestAnalyzer()
         fake = unittest.mock.Mock()
-        fake.complete.return_value = (
-            '{"requests": [{"kind": "general", "utterance": "Hi",'
-            ' "document": null, "question": null,'
-            ' "options": {"force_reingest": false, "section_scope": null}}]}'
-        )
+        fake.complete.return_value = _raw({
+            "ingestion": [],
+            "retrieval": [],
+            "general": [{"question": "Hi", "utterance": "Hi"}],
+        })
         with unittest.mock.patch.object(analyzer, "_llm", return_value=fake), \
                 self.assertLogs("src.routing.request_analyzer", level="INFO") as captured:
             analyzer.analyze("What is the color of the sky?")
         line = " ".join(captured.output)
         self.assertIn("Analyzing prompt (29 chars): What is the color of the sky?", line)
         self.assertIn("Analyzer raw answer", line)
-        self.assertIn('"kind": "general"', line)
+        self.assertIn('"question": "Hi"', line)
 
 
 class MetaPromptGuardTest(unittest.TestCase):
     """The meta-prompt guard: front-end auxiliary traffic (Open WebUI's
     title generation, follow-up suggestions, topic tagging) must never
-    reach the analyzer or the routing graph — fix C's logs proved those
-    prompts each triggered a full routing run whose answer the front-end
-    threw away. An explicit sentinel also lets a client probe the
-    endpoint without paying for a routing run."""
+    reach the analyzer or the routing graph. An explicit sentinel also
+    lets a client probe the endpoint without paying for a routing run."""
 
     # --- the classifier -------------------------------------------------
 
     def test_openwebui_title_prompt_is_meta(self):
-        # Verbatim shape from the fix C log session.
         self.assertTrue(guard.prompt_is_meta(
             "### Task: Generate a concise, 3-5 word title with an emoji "
             "summarizing the chat history."
@@ -352,20 +343,20 @@ class MetaPromptGuardTest(unittest.TestCase):
             result = analyzer.analyze(
                 "### Task: Generate a concise title for the chat history."
             )
-        self.assertEqual(result.requests, [])
+        self.assertEqual(result.request_count, 0)
         llm_factory.assert_not_called()  # not even constructed
 
     def test_analyzer_still_accepts_normal_prompts(self):
         analyzer = RequestAnalyzer()
         fake = unittest.mock.Mock()
-        fake.complete.return_value = (
-            '{"requests": [{"kind": "general", "utterance": "Hi",'
-            ' "document": null, "question": null,'
-            ' "options": {"force_reingest": false, "section_scope": null}}]}'
-        )
+        fake.complete.return_value = _raw({
+            "ingestion": [],
+            "retrieval": [],
+            "general": [{"question": "Hi", "utterance": "Hi"}],
+        })
         with unittest.mock.patch.object(analyzer, "_llm", return_value=fake):
             result = analyzer.analyze("Hello there!")
-        self.assertEqual(len(result.requests), 1)
+        self.assertEqual(result.request_count, 1)
 
     # --- the API boundary -------------------------------------------------
 
@@ -386,7 +377,6 @@ class MetaPromptGuardTest(unittest.TestCase):
         # The reply_to_meta_request switch is pinned OFF: this test owns
         # the guard semantics (fixed answer, routing never called) — the
         # agent-answering mode has its own tests (test_meta_request_agent).
-        # Unpinned, the real agent answered here with a live LLM call.
         with unittest.mock.patch(
             "src.tools.config_loader.load_setup_config",
             return_value={"reply_to_meta_request": False},

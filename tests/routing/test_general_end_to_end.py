@@ -2,8 +2,8 @@
 
 Covers the full production path minus the LLM itself:
 
-    run_routing → RoutingGraph → GeneralTaskAgent.run → payload["answer"]
-    → app.api._compose_reply → the user-facing text.
+    run_routing -> RoutingGraph -> GeneralTaskAgent.run -> payload["answer"]
+    -> app.api._compose_reply -> the user-facing text.
 """
 
 from __future__ import annotations
@@ -12,7 +12,11 @@ import unittest
 import unittest.mock
 
 from src.agents.agents.general_task_agent import GeneralTaskAgent
-from src.routing.models import AnalysisResult, RequestKind, UserRequest
+from src.routing.models import (
+    AnalysisResult,
+    GeneralRequest,
+    IngestionRequest,
+)
 from src.routing.routing_orchestrator import run_routing
 
 import app.api as api
@@ -23,11 +27,17 @@ class FakeAnalyzer:
         self.requests = requests
 
     def analyze(self, prompt):
-        return AnalysisResult(requests=self.requests)
+        result = AnalysisResult()
+        for request in self.requests:
+            if isinstance(request, IngestionRequest):
+                result.ingestion.append(request)
+            else:
+                result.general.append(request)
+        return result
 
 
 def _general(utterance="What color is the sky?"):
-    return UserRequest(kind=RequestKind.GENERAL, utterance=utterance)
+    return GeneralRequest(utterance=utterance, question=utterance)
 
 
 class _FakeLLM:
@@ -43,7 +53,7 @@ class GeneralEndToEndTest(unittest.TestCase):
         agent = GeneralTaskAgent(allow_missing_role=True, llm=_FakeLLM())
         result = run_routing(
             "What color is the sky?",
-            analyzer=FakeAnalyzer([_general()]),
+            analyzer=FakeAnalyzer(requests=[_general()]),
             agents={"general_task": agent},
         )
         self.assertEqual(result["status"], "handled")
@@ -75,8 +85,8 @@ class GeneralEndToEndTest(unittest.TestCase):
         agent = GeneralTaskAgent(allow_missing_role=True, llm=_FakeLLM("the answer"))
         result = run_routing(
             "ingest a.pdf then talk to me",
-            analyzer=FakeAnalyzer([
-                UserRequest(kind=RequestKind.INGESTION, utterance="ingest a.pdf", document="a.pdf"),
+            analyzer=FakeAnalyzer(requests=[
+                IngestionRequest(utterance="ingest a.pdf", document="a.pdf"),
                 _general(),
             ]),
             agents={"ingestion_task": _FailingIngestion(), "general_task": agent},
@@ -98,7 +108,7 @@ class GeneralEndToEndTest(unittest.TestCase):
                 ):
             result = run_routing(
                 "Who is Case?",
-                analyzer=FakeAnalyzer([_general("Who is Case?")]),
+                analyzer=FakeAnalyzer(requests=[_general("Who is Case?")]),
             )
         ingest.assert_not_called()
         self.assertEqual(result["status"], "handled")

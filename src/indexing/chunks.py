@@ -84,6 +84,10 @@ class VectorChunk:
     text: str
     metadata: dict[str, MetadataValue] = field(default_factory=dict)
     vector: Optional[list[float]] = None
+    #: Similarity of a retrieved chunk against its query (cosine, 0..1,
+    #: higher is better). ``None`` until a query fills it — storage never
+    #: sets it, it is a retrieval-time attribute only.
+    score: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------

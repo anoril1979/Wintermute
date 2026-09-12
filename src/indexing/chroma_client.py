@@ -25,8 +25,11 @@ Design points:
 * **Telemetry off** — the embedded client's posthog/analytics is noise in
   an offline, local-only system.
 
-Retrieval is stubbed (protocol contract): ``query`` and ``delete_document``
-raise ``NotImplementedError`` until the retrieval orchestrator lands.
+Retrieval is split by seam: ``query_by_vector`` is real (the retrieval
+layer embeds the question and hands the vector over — the store never
+embeds); ``query`` by text and ``delete_document`` remain honest stubs:
+text queries would couple the store to an embedding backend, and
+per-document deletion lands with index maintenance.
 ``count`` is real and read-only: it never creates the collection.
 """
 
@@ -78,8 +81,8 @@ class ChromaVectorClient:
     """Vector store client over embedded ChromaDB, one instance per collection.
 
     Implements :class:`src.indexing.protocols.VectorStoreProtocol` (upsert
-    now; query / delete_document are stubs until retrieval lands, count is
-    real).
+    and query_by_vector now; text query / delete_document are stubs, count
+    is real).
     """
 
     def __init__(
@@ -223,13 +226,71 @@ class ChromaVectorClient:
         )
         return len(chunks)
 
-    # -- Retrieval stubs -------------------------------------------------------
+    # -- Retrieval ----------------------------------------------------------------
+
+    def query_by_vector(
+        self,
+        vector: Sequence[float],
+        top_k: int = 5,
+        where: Optional[dict] = None,
+    ) -> list[VectorChunk]:
+        """Nearest-neighbor search with a pre-computed query vector.
+
+        Args mirror the protocol (see ``src/indexing/protocols.py`` for the
+        full contract). The store NEVER embeds: the caller computes the
+        query vector (same model as the collection's chunks).
+        """
+        if not vector:
+            raise ValueError("query_by_vector() requires a non-empty vector.")
+        if int(top_k) <= 0:
+            raise ValueError(f"top_k must be a positive int, got {top_k!r}.")
+
+        collection = self._ensure_collection()
+        try:
+            result = collection.query(
+                query_embeddings=[[float(v) for v in vector]],
+                n_results=int(top_k),
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            )
+        except Exception as exc:
+            raise VectorStoreError(
+                f"ChromaDB query failed on '{self._collection_name}': {exc}"
+            ) from exc
+
+        ids: list = result.get("ids", [[]])[0]
+        documents: list = result.get("documents", [[]])[0]
+        metadatas: list = result.get("metadatas", [[]])[0]
+        distances: list = result.get("distances", [[]])[0]
+
+        chunks: list[VectorChunk] = []
+        for chunk_id, chunk_text, metadata, distance in zip(ids, documents, metadatas, distances):
+            chunks.append(
+                VectorChunk(
+                    id=str(chunk_id),
+                    text=str(chunk_text or ""),
+                    metadata=dict(metadata or {}),
+                    # Cosine distance -> similarity: 1 - distance (higher
+                    # is better), clamped to [0, 1].
+                    score=max(0.0, min(1.0, 1.0 - float(distance or 0.0))),
+                )
+            )
+        logger.info(
+            "Queried '%s': %d hit(s) (top_k=%d, where=%s)",
+            self._collection_name, len(chunks), top_k, where,
+        )
+        return chunks
 
     def query(self, text: str, top_k: int = 5, where: Optional[dict] = None) -> list[VectorChunk]:
-        """Semantic search — STUB until the retrieval orchestrator lands."""
+        """Semantic search by text — STUB by design.
+
+        A text query would couple the store to an embedding backend (the
+        store must never embed). Embed the question and call
+        :meth:`query_by_vector` instead.
+        """
         raise NotImplementedError(
-            "Vector retrieval is not implemented yet: the retrieval "
-            "orchestrator (src/routing) will call this via VectorStoreProtocol."
+            "Text queries are not supported on the store: embed the question "
+            "(EmbeddingClientProtocol) and call query_by_vector() instead."
         )
 
     def count(self) -> int:
