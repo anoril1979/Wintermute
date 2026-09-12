@@ -46,7 +46,7 @@ ANSWER_PROMPT_PATH = Path("prompts/answering/retrieval_answer.md")
 
 #: Cap on excerpt characters fed to the model: the answerer must read
 #: the sources, not drown in them (top_k is already clamped upstream).
-MAX_EXCERPT_CHARS = 900
+MAX_EXCERPT_CHARS = 1500
 
 #: Marker for the "the sources hold nothing on this" reply. The prompt
 #: instructs the model to say it in the user's language; this constant
@@ -169,6 +169,7 @@ class AnswerAgent(LLMRoleAgent):
         )
 
         try:
+            logger.info(f"[llm] {prompt}")
             answer = self.llm_client().complete(prompt=prompt)
         except Exception as exc:  # LLMClientError / transport
             logger.warning("Answer agent LLM call failed: %s", exc)

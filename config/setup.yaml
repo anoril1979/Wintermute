@@ -29,7 +29,7 @@ routing:
   max_requests_per_prompt: 8
 
 logging:
-  level: "INFO"
+  level: "DEBUG"
   format: "%(asctime)s - [%(correlation_id)s] - %(name)s - %(levelname)s - %(message)s"
   # Durable log file (relative to the project root; "" disables file logging).
   file: "data/logs/wintermute.log"

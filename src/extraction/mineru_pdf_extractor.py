@@ -404,7 +404,8 @@ class MineruPDFExtractor(PDFExtractor):
             logger.warning("No TOC detected — all pages are orphans.")
             orphans = list(pages)
 
-        if orphans:
+        # Orphans should not be copied in chapters as it creates issues with duplicates later.
+        '''if orphans:
             chapters.append(
                 Chapter(
                     toc_entry=TocEntry(
@@ -421,7 +422,7 @@ class MineruPDFExtractor(PDFExtractor):
                         "page_count": len(orphans),
                     },
                 )
-            )
+            )'''
 
         return chapters, orphans
 

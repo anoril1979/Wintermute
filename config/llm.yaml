@@ -57,9 +57,9 @@ models:
   # (ingestion / retrieval / general).
   # Valeurs placeholder : à régler par l'utilisateur.
   request_analyzer:
-    model_name: "llama3:8b"
+    model_name: "qwen3"
     temperature: 0.0
-    max_response_tokens: 512
+    max_response_tokens: 1024
     timeout_seconds: 30
     top_p: 0.95
     context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
