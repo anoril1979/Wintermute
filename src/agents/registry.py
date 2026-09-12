@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Dict
 
+from src.agents.agents.answer_agent import AnswerAgent
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
 from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
@@ -41,4 +42,5 @@ def build_retrieval_agents() -> Dict[str, object]:
     """
     return {
         "semantic_retriever": SemanticRetrievalAgent(),
+        "answerer": AnswerAgent(allow_missing_role=True),
     }

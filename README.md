@@ -62,7 +62,7 @@ Within ingestion, the graph chains placeholder-ready steps (extraction, extracti
 
 **In the pipeline, at their respective gates:** ChromaDB (vector store) · PostgreSQL (structured knowledge) · markdown exports (human-browsable knowledge wiki, built from the extracted data).
 
-The legacy prototype already exercises LangChain + ChromaDB for retrieval; the new pipeline will absorb it once RetrievalTaskAgent lands.
+Retrieval is served end to end on our own stack: semantic search over the embedded ChromaDB store, then the AnswerAgent phrases the retrieved chunks into a grounded, cited reply (no LangChain anywhere in the live tree).
 
 ## User-facing surfaces
 

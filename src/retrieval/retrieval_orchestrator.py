@@ -231,9 +231,17 @@ def _solve_request(
     outcome = graph.run(context, kind=spec.kind.value)
 
     step_outcomes = outcome.as_list()
-    served = bool(step_outcomes) and step_outcomes[-1].get("status") == "ok"
+    # The LOOKUP step (semantic_search, ...) decides whether the request
+    # was served; the answer step only phrases its results. A missing or
+    # failed answerer never voids the search (skipped/failed answer →
+    # the caller degrades to the raw hits).
+    lookup = next(
+        (s for s in step_outcomes if s.get("step") != "answer"),
+        None,
+    )
+    served = bool(lookup) and lookup.get("status") == "ok"
     if not served:
-        # The step failed or is not implemented (no registry entry):
+        # The lookup failed or is not implemented (no registry entry):
         # report honestly with the step report for the caller.
         last = step_outcomes[-1] if step_outcomes else {}
         status = (
@@ -249,6 +257,7 @@ def _solve_request(
             "intent": spec.summary(),
             "steps": step_outcomes,
             "hits": [],
+            "answer": "",
         }
 
     hits = context.outputs.get("hits", [])
@@ -261,16 +270,23 @@ def _solve_request(
         }
         for hit in hits
     ]
+    # The answer step (when registered) phrases the hits into the final
+    # user-facing reply; the search results stay carried alongside so a
+    # phrasing failure never voids them.
+    answer = context.outputs.get("answer") or ""
     _emit(
         "request_done",
-        "%s%d chunk(s) retrieved" % (prefix, len(hit_dicts)),
+        "%s%d chunk(s) retrieved" % (prefix, len(hit_dicts))
+        + (" and answered" if answer else ""),
         hits=len(hit_dicts),
+        answered=bool(answer),
     )
     return {
         "status": STATUS_OK,
         "intent": spec.summary(),
         "filters": decision.filters.summary() if decision.filters else {},
         "hits": hit_dicts,
+        "answer": answer,
         "steps": step_outcomes,
     }
 
@@ -295,6 +311,8 @@ def _main() -> int:
     for sub in result.get("requests", []):
         intent = sub.get("intent", {})
         print(f"  [{sub['status']}] [{intent.get('kind', '?')}] {intent.get('question', '?')}")
+        if sub.get("answer"):
+            print(f"    answer: {sub['answer']}")
         for hit in sub.get("hits", []):
             meta = hit.get("metadata", {})
             print(

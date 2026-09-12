@@ -1,14 +1,18 @@
 """Retrieval graph: run the retrieval steps for one classified question.
 
-Mirror of the ingestion graph, read side. Today a single real step:
+Mirror of the ingestion graph, read side. Today two real steps for a
+``semantic`` request:
 
     semantic_search  -> "semantic_retriever" (SemanticRetrievalAgent)
+    answer           -> "answerer"           (AnswerAgent)
 
 The routing analyzer (upstream) already classified the lookup and the
 decision table assembled the filters; the graph hands the context to the
-step matching the request type and collects per-step outcomes. Request
-types without a serving agent (index, relation, summary, listing) are
-reported not-implemented — never silently degraded to a semantic search.
+steps matching the request type — the search fetches the scored hits,
+the answer agent phrases them into the user-facing reply (grounded in
+the hits only, prompt-enforced). Request types without serving agents
+(index, relation, summary, listing) are reported not-implemented —
+never silently degraded to a semantic search.
 
 Failure policy mirrors the ingestion graph: a step failing with a
 non-retryable domain ends the run with that step's result; retryable
@@ -32,9 +36,16 @@ RETRYABLE_DOMAINS = {FailureDomain.EXTERNAL}
 DEFAULT_MAX_RETRIES = 1
 
 #: Stable step name -> agent key mapping (registry keys, like ingestion).
+#: The answer step runs after the search of the kinds it serves: it
+#: phrases the fetched hits into the user-facing reply.
 STEPS = {
     "semantic_search": "semantic_retriever",
+    "answer": "answerer",
 }
+
+#: Extra step the graph appends after the kind's lookup step succeeded:
+#: the hits of these kinds are phrased into a user-facing answer.
+ANSWER_AFTER = {"semantic_search"}
 
 
 @dataclass
@@ -56,8 +67,16 @@ class RetrievalGraphOutcome:
 
     @property
     def ok(self) -> bool:
-        """True when every executed step succeeded (and at least one ran)."""
-        return bool(self.steps) and all(s.status == "ok" for s in self.steps)
+        """True when every executed step succeeded (and at least one ran).
+
+        A ``skipped`` step (e.g. no answerer registered) does not void
+        the run: the lookup's results are real work, phrasing is extra.
+        """
+        return (
+            bool(self.steps)
+            and all(s.status in ("ok", "skipped") for s in self.steps)
+            and any(s.status == "ok" for s in self.steps)
+        )
 
     @property
     def last_step(self) -> Optional[RetrievalStepOutcome]:
@@ -145,13 +164,39 @@ class RetrievalGraph:
         outcome.steps.append(
             self._run_step(context, step_name=step_name, agent_key=agent_key, agent=agent)
         )
+        if (
+            step_name in ANSWER_AFTER
+            and outcome.steps[-1].status == "ok"
+        ):
+            # The lookup succeeded: phrase its hits into the user reply.
+            answer_key = STEPS["answer"]
+            answer_agent = self._agents.get(answer_key)
+            if answer_agent is None:
+                # A missing answerer must not void the search: the run
+                # stays ok, the detail says what is missing.
+                context.emit(
+                    "task", "retrieval_step_skipped",
+                    f"no agent registered for step 'answer' — hits left unphrased",
+                    step="answer",
+                )
+                outcome.steps.append(
+                    RetrievalStepOutcome(
+                        step="answer", agent=answer_key, status="skipped",
+                        detail="no agent registered for 'answerer' yet",
+                    )
+                )
+            else:
+                outcome.steps.append(
+                    self._run_step(context, step_name="answer",
+                                   agent_key=answer_key, agent=answer_agent)
+                )
         return outcome
 
     # -- internals ---------------------------------------------------------------
 
     @staticmethod
     def _step_for_kind(kind: str) -> Optional[str]:
-        """The step serving a request type (None = not implemented)."""
+        """The lookup step serving a request type (None = not implemented)."""
         if kind == RetrievalLookupKind.SEMANTIC.value:
             return "semantic_search"
         return None

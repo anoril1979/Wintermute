@@ -60,19 +60,6 @@ from src.logging_setup import (
 
 configure_logging()
 
-# ---------------------------------------------------------------------------
-# The brain we proxy — imported defensively so the API can still start
-# even if the RAG stack itself is broken. Wintermute survives the
-# destruction of its components; so should the gateway.
-# ---------------------------------------------------------------------------
-try:
-    from src.retrieval.rag import answer as _rag_answer
-    from src.retrieval.rag import _initialiser_chaine  # startup warm-up
-except Exception:  # pragma: no cover — broken RAG stack must not kill the API
-    _rag_answer = None
-    _initialiser_chaine = None
-    logger.exception("RAG stack unavailable at import; the fallback answers in-band.")
-
 # Identity, wired to the project config where it matters. The prototype was
 # "dark-earth-rag"; the system grew, and something behind the wall of ice
 # started calling itself Wintermute.
@@ -118,21 +105,19 @@ class OllamaChatRequest(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Lifespan — "Wintermute was... motion toward the Awakening."
-# Warm the RAG chain at boot so the first real question is not the slow one.
-# A missing ChromaDB only means Wintermute stays dormant until ingestion.
+# A missing/empty vector store only means Wintermute stays dormant until
+# the first ingestion completes.
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    if _initialiser_chaine is not None:
-        awake = _initialiser_chaine()
-        if awake:
-            logger.info("Wintermute has attained the Awakening — RAG chain ready.")
-        else:
-            logger.warning(
-                "Wintermute stays dormant: ChromaDB not found or Ollama unreachable. "
-                "Run the ingestion first; /health reports details."
-            )
+    if _corpus_awake():
+        logger.info("Wintermute has attained the Awakening — vector store ready.")
+    else:
+        logger.warning(
+            "Wintermute stays dormant: the vector store is empty or unreadable. "
+            "Run an ingestion first; /health reports details."
+        )
     yield
 
 
@@ -214,8 +199,24 @@ def _request_cid(request: Request) -> str:
     return cid
 
 
+def _corpus_awake() -> bool:
+    """True when the vector store holds at least one indexed chunk.
+
+    The read-side health signal, replacing the legacy LangChain chain's
+    "awake" flag: the retrieval pipeline (semantic search + AnswerAgent)
+    is the memory now. Fail-open to False — a broken store is reported
+    dormant, never an exception out of /health or the lifespan.
+    """
+    try:
+        from src.retrieval.retrieval_router import gather_facts
+
+        return bool(gather_facts().has_corpus)
+    except Exception:  # noqa: BLE001 — health must not raise
+        return False
+
+
 def _brain_unavailable_text() -> str:
-    """Honest in-band answer when the legacy RAG stack is not importable.
+    """Honest in-band answer when the retrieval stack is not importable.
 
     Same spirit as fix B: a chat client treats an HTTP 503 as *its own*
     failure and silently retries the whole conversation — the very loop
@@ -223,9 +224,9 @@ def _brain_unavailable_text() -> str:
     final; the client has nothing to retry.
     """
     return (
-        "My retrieval memory is unavailable right now: the RAG stack failed "
-        "to load. Check that Ollama is running (`ollama serve`) and that the "
-        "dependencies are installed, then try again."
+        "My retrieval memory is unavailable right now: the retrieval stack "
+        "failed to load. Check that Ollama is running (`ollama serve`) and "
+        "that the dependencies are installed, then try again."
     )
 
 
@@ -302,17 +303,33 @@ def _meta_answer_for_prompt(prompt_text: str) -> str:
 
 
 def _ask(question: str) -> str:
-    """Call the RAG brain — failures become honest in-band answers.
+    """Answer a question from the corpus through the retrieval pipeline.
 
-    The chain itself already degrades gracefully (it answers a warning
-    text when ChromaDB is missing or Ollama is down); only an unexpected
-    exception lands here, and it must not become an HTTP 503: chat clients
-    auto-retry those and silently re-send the whole conversation.
+    Failures become honest in-band answers: only an unexpected exception
+    lands here, and it must not become an HTTP 503 (chat clients
+    auto-retry those and silently re-send the whole conversation).
     """
     try:
-        return _rag_answer(question)
+        from src.retrieval.retrieval_orchestrator import run_retrieval
+        from src.routing.models import RetrievalRequest
+
+        result = run_retrieval([RetrievalRequest(question=question)])
+        sub = next(
+            (r for r in result.get("requests", []) if r.get("answer")),
+            None,
+        )
+        if sub:
+            return str(sub["answer"])
+        if str(result.get("status", "")) == "no_corpus":
+            # Dormant memory invites ingestion — never tells the user to
+            # run a script (ingestion itself comes through Wintermute).
+            return (
+                "My retrieval memory is dormant: nothing is indexed yet. "
+                "Ask me to ingest a document first, then try again."
+            )
+        return str(result.get("message") or _brain_unavailable_text())
     except Exception:
-        logger.exception("The RAG chain failed while answering.")
+        logger.exception("The retrieval pipeline failed while answering.")
         return (
             "My retrieval memory hit an error while answering. Check that "
             "Ollama is running (`ollama serve`), then try your question again."
@@ -323,14 +340,14 @@ def _ask(question: str) -> str:
 # Routing — every user message first goes through the routing orchestrator
 # (src/routing), which analyzes the prompt into structured requests and
 # dispatches them (ingestion -> the ingestion orchestrator, retrieval ->
-# the RAG chain below until RetrievalTaskAgent exists, general -> fallback).
+# the retrieval pipeline, general -> fallback).
 # ---------------------------------------------------------------------------
 
 def _compose_reply(results: list) -> tuple:
     """Build the user-facing text from per-request routing results.
 
     Returns ``(text, needs_rag_fallback)``: retrieval requests that no task
-    agent handled yet are answered by the legacy RAG chain (see
+    agent handled yet are answered by the retrieval pipeline directly (see
     ``_route_or_answer``).
     """
     lines: List[str] = []
@@ -341,7 +358,7 @@ def _compose_reply(results: list) -> tuple:
         detail = str(result.get("detail", ""))
 
         if kind == "retrieval" and status == "not_implemented":
-            needs_rag = True  # answered by the RAG chain instead
+            needs_rag = True  # answered by the retrieval pipeline instead
             continue
         if status in ("incomplete", "set_aside"):
             # Underspecified request (or origin the system refuses to
@@ -354,6 +371,11 @@ def _compose_reply(results: list) -> tuple:
                 document = ingestion.get("document") or ingestion.get("path") or ""
                 steps = ", ".join(ingestion.get("completed_steps", [])) or "no step completed"
                 lines.append(f"Ingestion completed for '{document}' (steps: {steps}).")
+            elif kind == "retrieval" and detail:
+                # The answer agent's phrased reply (grounded, cited) —
+                # never a bare chunk-count status line. A retrieval with
+                # no phrased answer still carries its detail.
+                lines.append(detail)
             else:
                 lines.append(str(result.get("answer") or detail or "Done."))
         elif status == "not_implemented":
@@ -411,10 +433,12 @@ def _analysis_error_reply(message: str, cause: object) -> str:
 
 
 def _route_or_answer(question: str, *, on_event=None) -> tuple:
-    """One user message: routing first, legacy RAG for retrieval questions.
+    """One user message: routing first, retrieval pipeline as fallback.
 
-    TODO (routing): drop the ``needs_rag`` branch once RetrievalTaskAgent
-    exists and answers retrieval requests inside the routing graph.
+    The ``needs_rag`` branch now only fires for a retrieval request the
+    task agent could not serve at all (e.g. a broken agent registry);
+    the AnswerAgent answers every normal semantic request inside the
+    routing graph.
 
     ``on_event`` (optional) receives the routing trace events live, while
     the routing actually runs — used by the streaming endpoints to push
@@ -446,13 +470,7 @@ def _route_or_answer(question: str, *, on_event=None) -> tuple:
 
     text, needs_rag = _compose_reply(routing.get("results", []))
     if needs_rag:
-        if _rag_answer is None:
-            # The legacy stack is not even importable: say so in-band (the
-            # 503 that used to be raised here restarted the client loop).
-            text = _brain_unavailable_text()
-        else:
-            rag_answer = _ask(question)
-            text = "\n".join(part for part in (rag_answer, text) if part)
+        text = _ask(question)
     if not text:
         text = "I could not do anything with that request."
     return text, routing.get("results")
@@ -585,22 +603,16 @@ def root():
 
 @app.get("/health")
 def health():
-    """Status board: whether the RAG chain is awake and which Ollama model
-    backs the answer."""
-    awake = False
-    if _rag_answer is not None:
-        try:
-            from src.retrieval.rag import _rag_chain
-            awake = _rag_chain is not None
-        except Exception:
-            awake = False
+    """Status board: whether the corpus is indexed (the retrieval pipeline
+    is the memory) and which Ollama model backs the answer."""
+    awake = _corpus_awake()
     return {
         "status": "ok" if awake else "degraded",
-        "rag_chain_ready": awake,
+        "vector_store_ready": awake,
         "backing_model": _DEFAULT_MODEL,
         "detail": (
             "Wintermute runs." if awake
-            else "Dormant: no ChromaDB or Ollama down. Ingest documents first."
+            else "Dormant: no indexed document yet. Ingest documents first."
         ),
     }
 

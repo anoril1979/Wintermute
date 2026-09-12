@@ -68,11 +68,6 @@ models:
     max_retries: 2
     description: "Analyse le prompt utilisateur, l'explose en requêtes structurées et les classe (ingestion / retrieval / general)"
 
-  # NOTE: pas de rôle « retrieval_router » : la classification des
-  # requêtes de récupération (semantic / index / relation / summary /
-  # listing) est faite par l'analyseur unique (request_analyzer) — le
-  # pipeline de récupération est déterministe, sans LLM propre.
-
   # Rôle dédié au GeneralTaskAgent (src/agents/agents/general_task_agent.py):
   # réponses aux requêtes hors périmètre (small talk, culture générale,
   # questions sur le système) avec la connaissance propre du modèle,
@@ -106,6 +101,24 @@ models:
     thinking: false            # mode raisonnement (option Ollama think)
     max_retries: 1
     description: "Répond aux tâches d'arrière-plan du front-end (titre, tags, suggestions) — court et léger"
+
+  # Rôle dédié au AnswerAgent (src/agents/agents/answer_agent.py) :
+  # formulation de la réponse finale de la recherche sémantique à partir
+  # des chunks récupérés — ancrée strictement dans les extraits (aucune
+  # connaissance propre, aucune invention), avec citations [n] et dans la
+  # langue de l'utilisateur. Température basse : la fidélité aux sources
+  # prime sur le style.
+  answerer:
+    model_name: "llama3:8b"
+    temperature: 0.1
+    max_response_tokens: 2048
+    timeout_seconds: 60
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Formule la réponse finale à partir des chunks récupérés — ancrée sources, citations [n], langue de l'utilisateur"
 
   summarizer:
     model_name: "llama3:8b"           # modèle plus capable pour synthèse et rédaction

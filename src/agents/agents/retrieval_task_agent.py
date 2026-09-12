@@ -91,24 +91,35 @@ class RetrievalTaskAgent:
 
         if status in (_RETRIEVAL_OK, _RETRIEVAL_PARTIAL):
             hits = result.get("hits", [])
+            answers = [
+                str(sub.get("answer") or "")
+                for sub in result.get("requests", [])
+                if sub.get("answer")
+            ]
             served = sum(
                 1 for sub in result.get("requests", [])
                 if sub.get("status") == "ok"
             )
             total = len(result.get("requests", [])) or 1
-            detail = (
-                f"{len(hits)} chunk(s) retrieved"
-                if status == _RETRIEVAL_OK
-                else f"partial: {served}/{total} request(s) served, "
-                     f"{len(hits)} chunk(s) retrieved"
-            )
+            if answers:
+                # The answer agent phrased at least one request's hits:
+                # the detail is the reply, not a chunk count.
+                detail = "\n\n".join(answers)
+            elif status == _RETRIEVAL_OK:
+                detail = f"{len(hits)} chunk(s) retrieved"
+            else:
+                detail = (
+                    f"partial: {served}/{total} request(s) served, "
+                    f"{len(hits)} chunk(s) retrieved"
+                )
             context.emit(
                 "task", "retrieval_done",
-                detail,
+                detail[:200],
                 hits=len(hits),
                 served=served,
                 total=total,
                 partial=status == _RETRIEVAL_PARTIAL,
+                answered=len(answers),
             )
             return AgentResult(
                 agent_name=self.name,

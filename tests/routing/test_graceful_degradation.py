@@ -175,9 +175,10 @@ class FixBAnalysisErrorAnswerTest(unittest.TestCase):
 
 
 class RagFallbackNeverRaisesTest(unittest.TestCase):
-    """The legacy RAG fallback (retrieval requests the task agent could not
-    serve) must also answer in-band instead of raising: any HTTPException
-    there restarted the chat-client retry loop (third incident).
+    """The retrieval-pipeline fallback (retrieval requests the task agent
+    could not serve) must also answer in-band instead of raising: any
+    HTTPException there restarted the chat-client retry loop (third
+    incident).
 
     ``run_routing`` is stubbed: these tests exercise the API's fallback
     branch, not the routing layer (covered elsewhere, hermetically).
@@ -194,23 +195,19 @@ class RagFallbackNeverRaisesTest(unittest.TestCase):
             "traces": [],
         }
 
-    def test_unimportable_rag_stack_answers_in_band(self):
+    def test_failing_retrieval_pipeline_answers_in_band(self):
         with unittest.mock.patch(
             "src.routing.routing_orchestrator.run_routing",
             return_value=self._routed_retrieval(),
-        ), unittest.mock.patch.object(api, "_rag_answer", None):
-            text, results = api._route_or_answer("what is in the docs?")
-        self.assertIn("retrieval memory is unavailable", text)
-        self.assertTrue(results)  # the routing outcomes still flow back
-
-    def test_failing_rag_answer_answers_in_band(self):
-        with unittest.mock.patch(
-            "src.routing.routing_orchestrator.run_routing",
-            return_value=self._routed_retrieval(),
-        ), unittest.mock.patch.object(api, "_rag_answer", side_effect=RuntimeError("boom")):
+        ), unittest.mock.patch(
+            "src.retrieval.retrieval_orchestrator.run_retrieval",
+            side_effect=RuntimeError("boom"),
+        ):
+            # _ask catches the pipeline failure internally and answers
+            # in-band — never an HTTPException (the third incident).
             text, results = api._route_or_answer("what is in the docs?")
         self.assertIn("retrieval memory hit an error", text)
-        self.assertTrue(results)
+        self.assertTrue(results)  # the routing outcomes still flow back
 
     def test_streaming_path_always_yields_a_final_answer(self):
         """Even if the whole answer pipeline explodes inside the worker
@@ -224,27 +221,81 @@ class RagFallbackNeverRaisesTest(unittest.TestCase):
         self.assertIn("went wrong", final[0][1])
 
 
-class RagDormantMessageTest(unittest.TestCase):
-    """The dormant-chain answer must invite ingestion — not tell the user to
-    run ingest.py first (the self-locking loop: ingestion itself comes
+class RetrievalFallbackTest(unittest.TestCase):
+    """The API's direct-retrieval fallback (_ask) runs the real pipeline
+    (semantic search + AnswerAgent) and phrases its outcomes honestly."""
+
+    def test_ask_returns_the_phrased_answer(self):
+        with unittest.mock.patch(
+            "src.retrieval.retrieval_orchestrator.run_retrieval",
+            return_value={
+                "status": "ok",
+                "requests": [{"status": "ok", "answer": "The king fled [1].",
+                              "hits": [{}]}],
+                "hits": [{}],
+                "traces": [],
+            },
+        ):
+            self.assertEqual(api._ask("what happened?"), "The king fled [1].")
+
+    def test_ask_dormant_corpus_invites_ingestion(self):
+        with unittest.mock.patch(
+            "src.retrieval.retrieval_orchestrator.run_retrieval",
+            return_value={"status": "no_corpus", "message": "0/1 served",
+                          "requests": [], "hits": [], "traces": []},
+        ):
+            answer = api._ask("qui est Jean?")
+        self.assertIn("dormant", answer)
+        self.assertIn("ingest", answer)
+
+    def test_ask_pipeline_failure_answers_in_band(self):
+        with unittest.mock.patch(
+            "src.retrieval.retrieval_orchestrator.run_retrieval",
+            side_effect=RuntimeError("kaboom"),
+        ):
+            answer = api._ask("anything")
+        self.assertIn("retrieval memory hit an error", answer)
+
+
+class CorpusAwakeTest(unittest.TestCase):
+    """The dormant-state message must invite ingestion — not tell the user
+    to run ingest.py first (the self-locking loop: ingestion itself comes
     through Wintermute)."""
+
+    def test_corpus_awake_reflects_gathered_facts(self):
+        from src.retrieval.retrieval_router import RetrievalFacts
+
+        with unittest.mock.patch(
+            "src.retrieval.retrieval_router.gather_facts",
+            return_value=RetrievalFacts(chunk_count=7),
+        ):
+            self.assertTrue(api._corpus_awake())
+        with unittest.mock.patch(
+            "src.retrieval.retrieval_router.gather_facts",
+            return_value=RetrievalFacts(chunk_count=0),
+        ):
+            self.assertFalse(api._corpus_awake())
+
+    def test_corpus_awake_fails_open_to_false(self):
+        with unittest.mock.patch(
+            "src.retrieval.retrieval_router.gather_facts",
+            side_effect=RuntimeError("broken store"),
+        ):
+            self.assertFalse(api._corpus_awake())
 
     def test_dormant_message_never_says_lancez_ingest(self):
         import inspect
 
-        from src.retrieval import rag
-
-        source = inspect.getsource(rag)
+        source = inspect.getsource(api)
         self.assertNotIn("Lancez ingest.py", source)
 
     def test_dormant_answer_invites_ingestion(self):
-        import unittest.mock
-
-        from src.retrieval import rag
-
-        with unittest.mock.patch.object(rag, "_rag_chain", None), \
-                unittest.mock.patch.object(rag, "_initialiser_chaine", return_value=False):
-            answer = rag.answer("qui est Jean?")
+        with unittest.mock.patch(
+            "src.retrieval.retrieval_orchestrator.run_retrieval",
+            return_value={"status": "no_corpus", "message": "0/1 served",
+                          "requests": [], "hits": [], "traces": []},
+        ):
+            answer = api._ask("qui est Jean?")
         self.assertIn("dormant", answer)
         self.assertIn("ingest", answer)
 
