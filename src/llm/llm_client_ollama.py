@@ -173,7 +173,7 @@ class LLMClientOllama:
 
         Args:
             role: a role under the ``models`` key of llm.yaml
-                ("router", "summarizer", "default", "ingestion_router", ...).
+                ("router", "summarizer", "default", "answerer", ...).
 
         Returns:
             A client whose defaults come from the role section, with the

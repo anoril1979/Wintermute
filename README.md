@@ -9,8 +9,9 @@ A self-hosted, agentic **documentary assistant**: it ingests your documents, bui
 | Capability | State |
 |---|---|
 | General questions (model's own knowledge, in persona) | ✅ Working |
-| Document ingestion (PDF extraction → validation → summarization) | 🚧 In progress — pipeline runs, storage/indexing still being built |
-| Retrieval (question answering over the ingested corpus) | 🚧 Legacy prototype only — new agent not started |
+| Document ingestion (PDF extraction → validation → summarization → indexing) | ✅ Working — via the CLI (`scripts/ingest.py`), not the chat |
+| Corpus removal (vectors, checkpoints, JSONs) | ✅ Working — `scripts/remove.py` |
+| Retrieval (question answering over the ingested corpus) | ✅ Working — semantic search + AnswerAgent (relation/index lookups await the SQL gate) |
 | Knowledge base (characters, claims, locations…) | 📐 Designed & validated (models + unit tests), not yet wired to storage |
 
 Honesty rule of the project: components say what they are. Working parts are used; unfinished parts announce themselves instead of failing silently.
@@ -33,13 +34,19 @@ FastAPI gateway (app/api.py)  — one endpoint family, streaming traces included
 Routing orchestrator (src/routing) — request analyzer (LLM) → structured requests
         │   dispatches, in order, to task agents…
         ▼
-Task agents (src/agents)      — IngestionTask / GeneralTask / (RetrievalTask — soon)
+Task agents (src/agents)      — RetrievalTask / GeneralTask
         │
         ▼
-Ingestion orchestrator (src/ingestion) — its own routing, then the ingestion graph
-        │   extraction → validation → summarization → storage/indexing (in build)
+Retrieval pipeline (src/retrieval) — decision table → retrieval graph → AnswerAgent
+
+CLI (scripts/ingest.py, scripts/remove.py) — deterministic ingestion & removal,
+        never reachable from the chat (deliberate design)
+        │
         ▼
-Local Ollama instance         — every LLM call (routing, analysis, summarization, answering)
+Ingestion orchestrator (src/ingestion) — the ingestion graph
+        extraction → validation → summarization → indexing
+        ▼
+Local Ollama instance         — every LLM call (analysis, summarization, answering)
 ```
 
 In short: **front-end → FastAPI → Python agents → Ollama models**. The gateway speaks both the OpenAI and Ollama chat protocols, so any Ollama-compatible client treats Wintermute as just another model. While a request is processed, its internal steps stream to the client's "thinking" panel and are mirrored to `data/logs/wintermute.log`.
@@ -51,18 +58,15 @@ Requests are never interpreted by regex alone: an analyzer model turns each user
 Current agents:
 
 - **GeneralTaskAgent** — answers anything outside the corpus with the model's own knowledge, in the voice of Wintermute (roleplay is a feature, not a bug).
-- **IngestionTaskAgent** — hands file orders to the ingestion orchestrator.
-- **RetrievalTaskAgent** — planned; retrieval requests currently fall back to the legacy RAG chain or an honest "not available yet".
+- **RetrievalTaskAgent** — hands corpus questions to the deterministic retrieval pipeline (semantic search → AnswerAgent, a grounded cited reply).
 
-Within ingestion, the graph chains placeholder-ready steps (extraction, extraction validation, hierarchical summarization, then knowledge extraction, validation, indexing) with per-step agents to be plugged in one by one. Each agent carries its prompt (markdown files under `prompts/`) and its LLM role from `config/llm.yaml`.
+**Ingestion is deliberately not an agent**: a paradigm change moved it out of the chat. The analyzer cannot emit ingestion orders, so the router can never again hallucinate a file name into a phantom ingestion; instead `scripts/ingest.py` (and `scripts/remove.py`) run the strictly deterministic ingestion/removal flow, with a durable log (`data/logs/ingestion.log`) and explicit exit codes.
 
 ## Technologies
 
-**In place:** Python · FastAPI · Ollama (all LLM calls) · Pydantic (models & validation) · unittest (462 tests) · YAML configuration · markdown prompt files.
+**In place:** Python · FastAPI · Ollama (all LLM calls) · Pydantic (models & validation) · unittest (600+ tests) · ChromaDB (vector store) · YAML configuration · markdown prompt files.
 
-**In the pipeline, at their respective gates:** ChromaDB (vector store) · PostgreSQL (structured knowledge) · markdown exports (human-browsable knowledge wiki, built from the extracted data).
-
-Retrieval is served end to end on our own stack: semantic search over the embedded ChromaDB store, then the AnswerAgent phrases the retrieved chunks into a grounded, cited reply (no LangChain anywhere in the live tree).
+**In the pipeline, at their respective gates:** PostgreSQL (structured knowledge) · markdown exports (human-browsable knowledge wiki, built from the extracted data) · relation/index retrievals over the SQL layer.
 
 ## User-facing surfaces
 
@@ -78,7 +82,7 @@ The suite is hermetic: no live Ollama call, no real corpus — LLM clients and s
 PYTHONPATH=. venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"
 ```
 
-Expected output: `OK` — 460+ tests across routing, ingestion, extraction, knowledge, validation, summarization, helpers and API layers.
+Expected output: `OK` — 600+ tests across routing, retrieval, ingestion, extraction, indexing, knowledge, validation, summarization, helpers and API layers.
 
 A syntax/compile sanity check:
 
@@ -90,7 +94,8 @@ venv/Scripts/python.exe -m compileall -q src app tests
 
 - `config/llm.yaml` — LLM roles (routing, analysis, summarization, answering…), validated strictly at load: a missing role is an error, never a silent default.
 - `config/ingestion.yaml` — document folders, extraction settings, job-file paths.
-- `config/setup.yaml` — logging (console + rotating file under `data/logs/`).
+- `config/retrieval.yaml` — semantic-search tuning (top-k, min score, embedding role, query instruction).
+- `config/setup.yaml` — vector-store paths & collection names, routing caps, meta-request switch, logging (console + rotating file under `data/logs/`).
 
 ## Running
 
@@ -98,4 +103,19 @@ venv/Scripts/python.exe -m compileall -q src app tests
 python -m app.api          # http://127.0.0.1:8000
 ```
 
-Then point an Ollama-compatible client at it (Open WebUI → add a connection to `http://127.0.0.1:8000`). `GET /health` reports the state of the RAG stack; ingestible documents go under `data/sources/`.
+Then point an Ollama-compatible client at it (Open WebUI → add a connection to `http://127.0.0.1:8000`). `GET /health` reports the state of the RAG stack.
+
+## Ingesting & removing documents
+
+```bash
+# ingest (origin is mandatory)
+PYTHONPATH=. venv/Scripts/python.exe scripts/ingest.py -i "meow.pdf" -o canon
+# force a full re-ingestion / force re-summarization
+PYTHONPATH=. venv/Scripts/python.exe scripts/ingest.py -i "meow.pdf" -o community -f -s
+# remove from the corpus (source file kept)
+PYTHONPATH=. venv/Scripts/python.exe scripts/remove.py -i "meow.pdf"
+```
+
+Documents go under `data/sources/<ext>/` (the subfolder per extension mapping is set in `config/ingestion.yaml`); removal never touches the source file — it cleans the vector store, the job checkpoints, the extracted/summarized JSONs and the MinerU sandbox.
+
+The `-o/--origin` label is **user-defined governance metadata**: the vocabulary lives in `config/setup.yaml` (`documents.origins`), and you adapt it to your own usage context (the shipped default defines `canon`, `community`, `rpg`; the first entry is the default for ingestions run without `-o`). The label is stored verbatim in the extraction/summarized JSONs, the vector metadata, and later the SQL and markdown layers.

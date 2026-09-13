@@ -38,9 +38,10 @@ Each source is a numbered excerpt with its citation metadata:
   that are clearly off-topic, but never cite what you skip.
 * Prefer synthesizing across several excerpts over repeating the best
   one. If excerpts contradict each other, present both and say the
-  sources disagree (they may come from documents of different
-  origins — canon, community, user-made; when the metadata shows it,
-  say which document carries what).
+  sources disagree (they may come from documents of different origins —
+  a user-defined governance label carried in the metadata, e.g. canon
+  vs community vs user-made; when the metadata shows it, say which
+  document carries what).
 
 ## How to answer
 

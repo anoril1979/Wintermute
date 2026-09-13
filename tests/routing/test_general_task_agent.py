@@ -16,7 +16,7 @@ from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentStatus, FailureDomain
 from src.routing.models import (
     GeneralRequest,
-    IngestionRequest,
+    RetrievalRequest,
     RequestContextEntry,
 )
 
@@ -25,8 +25,8 @@ def _general(utterance="What color is the sky over the Sprawl?"):
     return GeneralRequest(utterance=utterance, question=utterance)
 
 
-def _ingestion():
-    return IngestionRequest(utterance="u", document="a.pdf")
+def _retrieval():
+    return RetrievalRequest(utterance="what is stored?", question="what is stored?")
 
 
 class _FakeLLM:
@@ -83,7 +83,7 @@ class GeneralTaskAgentTest(unittest.TestCase):
 
     def test_wrong_kind_is_input_data_failure(self):
         llm = _FakeLLM()
-        result = _agent(llm).run(self.context, _ingestion())
+        result = _agent(llm).run(self.context, _retrieval())
         self.assertEqual(result.status, AgentStatus.FAILED)
         self.assertEqual(result.failure_domain, FailureDomain.INPUT_DATA)
         self.assertEqual(llm.prompts, [])  # no LLM call made
@@ -144,7 +144,7 @@ class PromptLocalMemoryTest(unittest.TestCase):
             question="so, is it safe?",
             preceding=[
                 RequestContextEntry(
-                    kind="ingestion", utterance="ingest meow.pdf",
+                    kind="retrieval", utterance="what is stored about the gazette?",
                     status="done",
                 ),
                 RequestContextEntry(
@@ -156,7 +156,7 @@ class PromptLocalMemoryTest(unittest.TestCase):
         _agent(llm).run(self.context, request)
         prompt = llm.prompts[0]
         self.assertIn("Earlier requests of this same user prompt, in order", prompt)
-        self.assertIn('[ingestion] "ingest meow.pdf" — done', prompt)
+        self.assertIn('[retrieval] "what is stored about the gazette?" — done', prompt)
         self.assertIn('[general] "thanks!" — rejected: boom', prompt)
         # context block injected after the persona rules, before the utterance
         self.assertGreater(
@@ -173,12 +173,12 @@ class PromptLocalMemoryTest(unittest.TestCase):
         request = GeneralRequest(
             utterance="is it indexed?", question="is it indexed?",
             preceding=[RequestContextEntry(
-                kind="ingestion", utterance="ingest meow.pdf",
+                kind="retrieval", utterance="what is stored about the gazette?",
                 status="done",
             )],
         )
         _agent(llm).run(self.context, request)
-        self.assertIn("meow.pdf", llm.prompts[0])
+        self.assertIn("gazette", llm.prompts[0])
 
 
 class RegistryWiringTest(unittest.TestCase):

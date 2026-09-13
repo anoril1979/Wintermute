@@ -5,7 +5,8 @@ Layout (contracts above, workers below):
 * ``protocols.py``      — ingestion-graph agent protocols + the Agent result
                           vocabulary (AgentStatus / FailureDomain / AgentResult);
 * ``task_protocols.py`` — user-task agent protocols for the routing graph
-                          (UserTaskAgent: Retrieval / Ingestion / General);
+                          (UserTaskAgent: Retrieval / General; ingestion is
+                          a CLI operation, never routed);
 * ``contexts.py``       — the context objects flowing through the graphs
                           (IngestionContext, RoutingContext);
 * ``llm_roles.py``      — strict LLM-role resolution for LLM-backed agents;
@@ -15,7 +16,6 @@ Layout (contracts above, workers below):
 
 from src.agents.agents import PDFExtractionAgent, SummarizerAgent
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
-from src.agents.agents.ingestion_task_agent import IngestionTaskAgent
 from src.agents.contexts import IngestionContext, RoutingContext
 from src.agents.llm_roles import LLMRoleAgent, MissingLLMRoleError, require_llm_role
 from src.agents.protocols import (
@@ -37,7 +37,6 @@ from src.agents.registry import build_default_agents
 from src.agents.routing_registry import build_default_task_agents
 from src.agents.task_protocols import (
     GeneralTaskAgent,
-    IngestionTaskAgent,
     RetrievalTaskAgent,
     UserTaskAgent,
 )
@@ -54,7 +53,6 @@ __all__ = [
     "GeneralTaskAgent",
     "IngestionAgent",
     "IngestionContext",
-    "IngestionTaskAgent",
     "IndexerAgent",
     "KnowledgeExtractorAgent",
     "KnowledgeValidatorAgent",

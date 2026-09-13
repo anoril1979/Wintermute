@@ -284,9 +284,51 @@ class ChromaClientTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             self.client.query("hello")
 
-    def test_delete_document_is_a_stub(self):
-        with self.assertRaises(NotImplementedError):
-            self.client.delete_document("Gazette")
+    def test_delete_document_removes_one_documents_chunks(self):
+        """The corpus-maintenance seam: delete by doc_id, count drops to 0."""
+        chunks = self._embedded_chunks(3)
+        doc_id = chunks[0].metadata["doc_id"]
+        self.client.upsert(chunks)
+        self.assertEqual(self.client.count(), 3)
+
+        deleted = self.client.delete_document(doc_id)
+        self.assertEqual(deleted, 3)
+        self.assertEqual(self.client.count(), 0)
+
+    def test_delete_document_keeps_other_documents(self):
+        """Deleting one document must not touch its neighbors' chunks."""
+        embedder = _StubEmbedder()
+        doc_a = build_source_chunks(_doc())[:2]
+        doc_b = build_source_chunks(
+            _doc(title="Other Document", source_path="data/sources/pdf/Other.pdf")
+        )[:2]
+        for chunk in doc_a + doc_b:
+            chunk.vector = embedder.embed([chunk.text])[0]
+        self.client.upsert(doc_a + doc_b)
+        self.assertEqual(self.client.count(), 4)
+
+        deleted = self.client.delete_document(doc_a[0].metadata["doc_id"])
+        self.assertEqual(deleted, 2)
+        self.assertEqual(self.client.count(), 2)
+        remaining_ids = {c.id for c in self.client.query_by_vector(
+            doc_b[0].vector, top_k=10
+        )}
+        self.assertTrue(all(i.startswith(doc_b[0].metadata["doc_id"])
+                            for i in remaining_ids))
+
+    def test_delete_document_unknown_id_returns_zero(self):
+        self.client.upsert(self._embedded_chunks(2))
+        self.assertEqual(self.client.delete_document("doc:00000000"), 0)
+        self.assertEqual(self.client.count(), 2)
+
+    def test_delete_document_on_missing_store_returns_zero(self):
+        """Deleting from a never-materialized store deletes nothing."""
+        self.assertEqual(self.client.delete_document("doc:abcdef12"), 0)
+        self.assertFalse((self.tmp / "chroma.sqlite3").exists())
+
+    def test_delete_document_rejects_blank_id(self):
+        with self.assertRaises(ValueError):
+            self.client.delete_document("   ")
 
     def test_unknown_collection_key(self):
         with self.assertRaises(Exception):

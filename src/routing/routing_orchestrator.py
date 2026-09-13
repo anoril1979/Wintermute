@@ -5,22 +5,23 @@ Called by the app API (app/api.py) for every user message, it:
     1. analyzes the raw prompt ONCE into requests grouped by scope
        (RequestAnalyzer, ``request_analyzer`` LLM role, prompt
        prompts/routing/request_analysis.md) — retrieval lookups arrive
-       already classified with self-contained questions, ingestion orders
-       with document/force/origin. Pronouns are resolved at analysis
-       time; nothing downstream re-reads the user's words;
+       already classified with self-contained questions. Pronouns are
+       resolved at analysis time; nothing downstream re-reads the user's
+       words;
     2. hands the grouped result to the routing graph
        (src/graphs/routing_graph.py), which dispatches the flattened
-       requests in grouped scope order (ingestions, then retrievals, then
-       generals) to their task agent:
-         ingestion -> IngestionTaskAgent  (deterministic orchestrator)
+       requests in grouped scope order (retrievals, then generals) to
+       their task agent:
          retrieval -> RetrievalTaskAgent  (deterministic pipeline)
-         general   -> GeneralTaskAgent    (the only LLM-based worker;
+         general   -> GeneralTaskAgent    (the LLM-based fallback worker;
                                      later joined by the AnswerAgent);
-       Before dispatch, the graph applies the deterministic origin gate:
-       an ingestion whose origin cannot be decided (stated / stored /
-       inferred) is SET ASIDE, not ingested, and reported at the end;
     3. returns a structured, per-request result list the caller (API or
        CLI) turns into the user-facing reply.
+
+**Ingestion is not routed.** Document ingestion is a CLI operation
+(scripts/ingest.py): the analyzer cannot emit ingestion requests, and a
+prompt asking for ingestion in conversation reaches the general agent,
+which explains the actual workflow.
 
 Task agents resolve from an injected registry; ``None`` builds the default
 registry (src/agents/routing_registry.build_default_task_agents). Missing
@@ -47,7 +48,6 @@ from src.graphs import RoutingGraph, RoutingOutcome
 from src.logging_setup import configure_logging
 from src.routing.models import (
     GeneralRequest,
-    IngestionRequest,
     RetrievalRequest,
 )
 from src.routing.request_analyzer import RequestAnalysisError, RequestAnalyzer
@@ -111,12 +111,10 @@ def run_routing(
     requests = analysis.flattened()
     context.metadata["request_count"] = len(requests)
     context.metadata["groups"] = {
-        "ingestion": len(analysis.ingestion),
         "retrieval": len(analysis.retrieval),
         "general": len(analysis.general),
     }
     summary_bits = [
-        f"{len(analysis.ingestion)} ingestion, "
         f"{len(analysis.retrieval)} retrieval, "
         f"{len(analysis.general)} general"
     ]
@@ -171,15 +169,6 @@ def _resolve_task_agents(
 
 def _request_summary(request: object) -> dict:
     """Compact per-request summary for the ``understood`` trace event."""
-    if isinstance(request, IngestionRequest):
-        return {
-            "scope": "ingestion",
-            "document": request.document,
-            "force": request.force,
-            "redo_summaries": request.redo_summaries,
-            "origin": request.origin,
-            "utterance": request.utterance,
-        }
     if isinstance(request, RetrievalRequest):
         return {
             "scope": "retrieval",

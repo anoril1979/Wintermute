@@ -73,7 +73,8 @@ from src.helpers.document_extract_json_store import (
     save_extract,
 )
 from src.extraction.ids import assign_extract_ids
-from src.extraction.models import DocumentExtract, DocumentOrigin
+from src.extraction.models import DocumentExtract
+from src.tools.config_loader import coerce_origin
 from src.extraction.mineru_pdf_extractor import MineruPDFExtractor
 from src.extraction.validation import (
     SEVERITY_WARNING,
@@ -226,23 +227,26 @@ class PDFExtractionAgent:
                 detail="extractor returned no document",
             )
 
-        # Document origin (governance metadata) — decided by the router
+        # Document origin (governance metadata) — decided by the CLI
         # BEFORE the graph runs; the agent only applies it. A missing value
-        # defaults to canon but is reported: an unverified origin must be
-        # visible (the extraction validator warns too).
+        # takes the configured default (first entry of setup.yaml
+        # documents.origins) but is reported: an unverified origin must be
+        # visible (the extraction validator warns too). A value OUTSIDE the
+        # user-defined vocabulary is rejected, never guessed.
         origin_raw = context.metadata.get("document_origin")
         if origin_raw is not None:
-            try:
-                document.origin = DocumentOrigin(str(origin_raw).strip().lower())
-            except ValueError:
+            coerced = coerce_origin(str(origin_raw))
+            if coerced is not None:
+                document.origin = coerced
+            else:
                 context.emit("task", "origin_warning",
                              f"unknown document origin {origin_raw!r}; "
-                             f"defaulting to '{document.origin.value}'")
+                             f"defaulting to '{document.origin}'")
         else:
             context.emit("task", "origin_missing",
-                         "no document origin provided; defaulting to "
-                         "'canon' (unverified)")
-        context.metadata["document_origin"] = document.origin.value
+                         f"no document origin provided; defaulting to "
+                         f"'{document.origin}' (unverified)")
+        context.metadata["document_origin"] = document.origin
 
         # Unified ids (src/extraction/ids.py) — assigned before any
         # persistence so the canonical JSON carries them from birth. A
@@ -364,13 +368,14 @@ class PDFExtractionAgent:
         # — it was decided at its extraction and persisted with it.
         origin_raw = context.metadata.get("document_origin")
         if origin_raw is not None:
-            try:
-                document.origin = DocumentOrigin(str(origin_raw).strip().lower())
-            except ValueError:
+            coerced = coerce_origin(str(origin_raw))
+            if coerced is not None:
+                document.origin = coerced
+            else:
                 context.emit("task", "origin_warning",
                              f"unknown document origin {origin_raw!r}; "
-                             f"keeping the stored '{document.origin.value}'")
-        context.metadata["document_origin"] = document.origin.value
+                             f"keeping the stored '{document.origin}'")
+        context.metadata["document_origin"] = document.origin
 
         context.outputs[self._output_key] = document
         context.metadata.update(
@@ -445,17 +450,18 @@ class PDFExtractionAgent:
             # request-level one, or default with a visible warning.
             origin_raw = context.metadata.get("document_origin")
             if origin_raw is not None:
-                try:
-                    document.origin = DocumentOrigin(str(origin_raw).strip().lower())
-                except ValueError:
+                coerced = coerce_origin(str(origin_raw))
+                if coerced is not None:
+                    document.origin = coerced
+                else:
                     context.emit("task", "origin_warning",
                                  f"unknown document origin {origin_raw!r}; "
-                                 f"defaulting to '{document.origin.value}'")
+                                 f"defaulting to '{document.origin}'")
             else:
                 context.emit("task", "origin_missing",
-                             "no document origin provided; defaulting to "
-                             "'canon' (unverified)")
-            context.metadata["document_origin"] = document.origin.value
+                             f"no document origin provided; defaulting to "
+                             f"'{document.origin}' (unverified)")
+            context.metadata["document_origin"] = document.origin
 
             context.outputs[self._output_key] = document
             context.metadata.update(

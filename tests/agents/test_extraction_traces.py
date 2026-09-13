@@ -6,18 +6,15 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from src.agents.agents.ingestion_task_agent import IngestionTaskAgent
 from src.agents.agents.pdf_extraction_agent import (
     FORCE_EXTRACTION_KEY,
     PDFExtractionAgent,
 )
-from src.agents.contexts import IngestionContext, RoutingContext
+from src.agents.contexts import IngestionContext
 from src.extraction.document_extractor import DocumentExtractor
 from src.extraction.mineru_pdf_extractor import MineruPDFExtractor
 from src.extraction.models import DocumentExtract
 from src.graphs import IngestionGraph
-from src.routing.models import AnalysisResult, IngestionRequest
-from src.routing.routing_orchestrator import run_routing
 from src.tools.extraction_job_file import ExtractionJobFile
 
 
@@ -213,7 +210,11 @@ class IngestionGraphTraceTest(unittest.TestCase):
 
 
 class OrchestratorPassThroughTest(unittest.TestCase):
-    def test_pipeline_traces_reach_routing_result(self):
+    def test_pipeline_traces_merge_into_one_ordered_log(self):
+        """The ingestion graph's pipeline traces stay ordered when a caller
+        (CLI script, former task agent) collects the context events — the
+        property the routing layer used to rely on when merging the
+        pipeline's traces into its own event log."""
         import tempfile
         from pathlib import Path
 
@@ -221,50 +222,29 @@ class OrchestratorPassThroughTest(unittest.TestCase):
             pdf = Path(tmp) / "doc.pdf"
             pdf.write_bytes(b"%PDF-1.4 fake")
 
-            def runner(path, force=False, on_event=None, **kwargs):
-                context = IngestionContext(
-                    document_path=path, request="[test]", on_event=on_event
-                )
-                outcome = IngestionGraph(
-                    agents={"content_extractor": PDFExtractionAgent(
-                        extractor=StubExtractor(),
-                        job_file=ExtractionJobFile(Path(tmp) / "jobs.json"),
-                        canonical_dir=Path(tmp) / "extracted",
-                    )},
-                    steps=IngestionGraph.DEFAULT_STEPS[:1],
-                ).run(context)
-                return {
-                    "status": "accepted",
-                    "completed_steps": outcome.completed_steps,
-                    "traces": list(context.events),
-                }
+            context = IngestionContext(
+                document_path=pdf, request="[cli]"
+            )
+            graph = IngestionGraph(
+                agents={"content_extractor": PDFExtractionAgent(
+                    extractor=StubExtractor(),
+                    job_file=ExtractionJobFile(Path(tmp) / "jobs.json"),
+                    canonical_dir=Path(tmp) / "extracted",
+                )},
+                steps=IngestionGraph.DEFAULT_STEPS[:1],
+            )
+            outcome = graph.run(context)
 
-            class FakeAnalyzer:
-                def analyze(self, prompt):
-                    return AnalysisResult(ingestion=[
-                        # origin stated: the deterministic origin gate
-                        # lets the request through to the task agent
-                        IngestionRequest(utterance="ingest", document="doc.pdf",
-                                         origin="rpg")
-                    ])
-
-            with unittest.mock.patch(
-                "src.tools.ingest_tool.ingest_document",
-                return_value={"status": "ready", "path": str(pdf)},
-            ):
-                result = run_routing(
-                    "ingest doc.pdf", analyzer=FakeAnalyzer(),
-                    agents={"ingestion_task": IngestionTaskAgent(runner=runner)},
-                )
-
-            phases = {t["phase"] for t in result["traces"]}
-            self.assertEqual(phases, {"analysis", "dispatch", "task", "pipeline"})
-            kinds = [t["kind"] for t in result["traces"]]
+            self.assertTrue(outcome.accepted)
+            phases = {t["phase"] for t in context.events}
+            self.assertIn("pipeline", phases)
+            kinds = [t["kind"] for t in context.events]
             self.assertIn("extracting", kinds)
             self.assertIn("extracted", kinds)
             self.assertIn("step_started", kinds)
-            # ingestion_done comes after the merged pipeline traces
-            self.assertLess(kinds.index("step_done"), kinds.index("ingestion_done"))
+            # the pipeline traces are ordered among themselves
+            self.assertLess(kinds.index("step_started"), kinds.index("step_done"))
+            self.assertLess(kinds.index("extracting"), kinds.index("extracted"))
 
 
 if __name__ == "__main__":

@@ -10,10 +10,12 @@ module installs, once per process, two handlers on the root logger:
   (``data/logs/wintermute.log`` by default), so an ingestion can be
   investigated after the fact, outside the live "thinking" panel.
 
-Settings come from ``config/setup.yaml`` (``logging:`` section). ``level``
-and ``format`` were already declared there but never applied; ``file``
-(optional — empty string disables the file handler), ``max_bytes`` and
-``backup_count`` complete the section.
+Settings come from ``config/setup.yaml`` (``logging:`` section) through
+``config_loader.load_logging_config()`` (schema-validated at load time;
+see ``validate_logging_config``). ``level`` and ``format`` were already
+declared there but never applied; ``main_log`` (optional — empty string
+disables the file handler), ``max_bytes`` and ``backup_count`` complete
+the section.
 
 ``configure_logging()`` is idempotent: the API, the CLI entry points and the
 tests may all call it, only the first call installs handlers (unless
@@ -108,13 +110,14 @@ class CorrelationIdFilter(logging.Filter):
 
 
 def _logging_settings() -> dict:
-    """Return the ``logging:`` section of setup.yaml ({} on any failure).
+    """Return the validated ``logging:`` section of setup.yaml ({} on failure).
 
     Logging setup must never take the whole application down because
-    setup.yaml is malformed: fall back to defaults and let the app run.
+    setup.yaml is malformed: a missing, malformed or schema-invalid
+    section falls back to defaults and lets the app run (warned once).
     """
     try:
-        settings = config_loader.load_setup_config().get("logging")
+        settings = config_loader.load_logging_config()
     except Exception as exc:  # noqa: BLE001 — config problems must not kill logging
         # Use the module logger *before* configuration: with no handler
         # installed, the record goes to lastResort (stderr) — visible enough.
@@ -141,7 +144,7 @@ def configure_logging(force: bool = False) -> Optional[Path]:
 
     Returns:
         The resolved log file path, or ``None`` when file logging is
-        disabled (``logging.file: ""`` in setup.yaml).
+        disabled (``logging.main_log: ""`` in setup.yaml).
     """
     global active_log_file
     if _INSTALLED and not force:
@@ -177,7 +180,7 @@ def configure_logging(force: bool = False) -> Optional[Path]:
     _INSTALLED.append(console)
 
     active_log_file = None
-    raw_file = settings.get("file", str(DEFAULT_LOG_FILE))
+    raw_file = settings.get("main_log", str(DEFAULT_LOG_FILE))
     if raw_file:
         log_path = _resolve_log_path(raw_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)

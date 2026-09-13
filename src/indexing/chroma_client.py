@@ -27,9 +27,11 @@ Design points:
 
 Retrieval is split by seam: ``query_by_vector`` is real (the retrieval
 layer embeds the question and hands the vector over — the store never
-embeds); ``query`` by text and ``delete_document`` remain honest stubs:
-text queries would couple the store to an embedding backend, and
-per-document deletion lands with index maintenance.
+embeds) and ``query`` by text stays an honest stub (a text query would
+couple the store to an embedding backend). Index maintenance is real:
+``delete_document`` removes every chunk of one document by its metadata
+``doc_id`` (the unified id scheme) — the store is a mirror of the corpus,
+so removing a document from the corpus means removing its projection.
 ``count`` is real and read-only: it never creates the collection.
 """
 
@@ -311,11 +313,54 @@ class ChromaVectorClient:
             ) from exc
 
     def delete_document(self, doc_id: str) -> int:
-        """Delete every chunk of one document — STUB until retrieval lands."""
-        raise NotImplementedError(
-            "Per-document deletion is not implemented yet: it lands with the "
-            "retrieval / index-maintenance step."
+        """Delete every chunk of one document, by its unified id.
+
+        The deletion key is the chunk metadata ``doc_id`` (``doc:<8hex>``,
+        src/extraction/ids.py) — the same id the knowledge layer uses — so
+        one document's whole projection (blocks, section/page/chapter/
+        document summaries, every hierarchical chain) is removed in one
+        metadata-filtered delete. No vector search involved: identity, not
+        similarity.
+
+        Args:
+            doc_id: the document's unified id (``doc:<8hex>``).
+
+        Returns:
+            The number of chunks deleted (0 for an unknown document or a
+            store that was never materialized — deleting from nothing
+            deletes nothing, it is not an error).
+
+        Raises:
+            ValueError: an empty/blank ``doc_id``.
+            VectorStoreUnavailableError: the store could not be opened.
+            VectorStoreError: ChromaDB refused the deletion.
+        """
+        doc_id = (doc_id or "").strip()
+        if not doc_id:
+            raise ValueError("delete_document() requires a non-empty doc_id.")
+        if not self._store_exists():
+            return 0
+
+        collection = self._ensure_collection()
+        where = {"doc_id": {"$eq": doc_id}}
+        try:
+            # Count first (ids only), then delete: Chroma's delete() return
+            # value is version-dependent, the get() count is not.
+            existing = collection.get(where=where, include=[])
+            ids = list(existing.get("ids") or [])
+            if not ids:
+                return 0
+            collection.delete(where=where)
+        except Exception as exc:
+            raise VectorStoreError(
+                f"ChromaDB delete failed on '{self._collection_name}' "
+                f"for doc_id '{doc_id}': {exc}"
+            ) from exc
+        logger.info(
+            "Deleted %d chunk(s) of '%s' from collection '%s'",
+            len(ids), doc_id, self._collection_name,
         )
+        return len(ids)
 
     # -- Internals ---------------------------------------------------------------
 

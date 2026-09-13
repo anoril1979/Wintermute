@@ -31,6 +31,7 @@ from src.agents.contexts import IngestionContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.extraction.consistency import check_and_prune, has_content
 from src.extraction.models import DocumentExtract
+from src.tools.config_loader import get_default_origin
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +67,15 @@ class ExtractionValidationAgent:
         )
 
         # Governance check — origin must be present. The model defaults to
-        # canon, so the *field* is never empty; the point of this check is
-        # to make an UNVERIFIED default visible (the router should always
-        # provide document_origin in the metadata).
+        # the configured default (first entry of setup.yaml
+        # documents.origins), so the *field* is never empty; the point of
+        # this check is to make an UNVERIFIED default visible (the CLI
+        # should always provide document_origin in the metadata).
         if not context.metadata.get("document_origin"):
             context.emit(
                 "task", "origin_missing",
-                "document origin unknown at validation time (canon assumed "
-                "by default, unverified)",
+                f"document origin unknown at validation time ('{get_default_origin()}' "
+                "assumed by default, unverified)",
             )
         report = check_and_prune(document)
 

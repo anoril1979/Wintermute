@@ -185,6 +185,31 @@ class FiltersTest(unittest.TestCase):
         data = RetrievalFilters(document="G", origins=["rpg"]).summary()
         self.assertEqual(set(data), {"document", "origins"})
 
+    def test_unknown_origin_is_rejected_with_configured_vocabulary(self):
+        # The vocabulary is user-defined (setup.yaml documents.origins);
+        # an unknown label is refused, naming the configured origins.
+        with self.assertRaises(InvalidFilterError) as ctx:
+            RetrievalFilters(origins=["galactic-empire"]).build_where()
+        self.assertIn("galactic-empire", str(ctx.exception))
+        self.assertIn("canon", str(ctx.exception))
+
+    def test_origins_vocabulary_is_read_lazily(self):
+        """A user adding an origin to setup.yaml can filter on it without
+        a code change — the allowed set is read at validation time."""
+        import unittest.mock as mock
+        import src.tools.config_loader as cl
+
+        section = {"origins": ["fan-work", "homebrew"]}
+        with mock.patch.object(cl, "_load_documents_config", return_value=section):
+            # Single facet: returned bare, not wrapped in $and.
+            where = RetrievalFilters(origins=["homebrew"]).build_where()
+            self.assertEqual(where, {"origin": {"$in": ["homebrew"]}})
+            # Under this custom vocabulary, the shipped canon is unknown.
+            with self.assertRaises(InvalidFilterError):
+                RetrievalFilters(origins=["canon"]).build_where()
+        # Patch released: the real setup.yaml vocabulary applies again.
+        RetrievalFilters(origins=["canon"]).build_where()
+
 
 # ---------------------------------------------------------------------------
 # Spec models (built from the analyzer's requests — no LLM parsing)

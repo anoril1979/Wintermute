@@ -1,27 +1,26 @@
-"""ingest_tool.py — Tool exposed to the LLM orchestrator: ingest a document.
+"""ingest_tool.py — sandboxed document resolution for the documents tree.
 
-Contract (for the future orchestrator):
-    1. The orchestrator receives an intent such as
-       "Please ingest the new 'meow.pdf'" and calls
-       ``ingest_document("meow.pdf")``.
-    2. The tool resolves the document SANDBOXED inside the documents root
-       (config/ingestion.yaml: ``documents_root``), in the subfolder
-       mapped to the file's extension (``extensions`` mapping). The LLM
-       can only reference file names, never arbitrary paths.
-    3. It returns a structured result the orchestrator can forward to the
-       LLM so it phrases the final user-facing reply:
-           - {"status": "ready", ...}   -> found, ingestion not wired yet
-           - {"status": "ingested", ...}-> success (not wired yet)
-           - {"status": "no_file", ...} -> orchestrator answers "no file";
-              the LLM then tells the user e.g. "I'm sorry dude, but I
-              can't find that file for ingestion."
-           - {"status": "invalid_reference", ...} -> unusable input.
-           - {"status": "unsupported_extension", ...} -> extension not in
-              the ingestion.yaml mapping.
+The single place that knows how a document reference maps onto the
+documents root (config/ingestion.yaml): the extension→subfolder mapping,
+exact/case-insensitive/stem lookup, and the fuzzy candidate promotion for
+near-miss names.
 
-NOTE: the actual ingestion execution is intentionally NOT wired yet —
-see ``_execute_ingestion``. The import of the ingestion workflow is
-already in place but unused, as requested.
+Since the paradigm change, ingestion is NOT triggered from the chat: the
+routing layer never ingests, and this module no longer executes anything —
+it only **resolves** references. The ingestion itself runs through
+scripts/ingest.py → src/ingestion/ingestion_orchestrator (deterministic,
+non-zero exit code on failure), and corpus removal through
+scripts/remove.py → src/ingestion/remove_from_corpus.
+
+Callers: the routing graph (origin gate fact-check), the corpus removal
+engine, and the CLI scripts.
+
+Resolution result (a plain dict)::
+
+    {"status": "found", "document": ..., "path": ...}
+    {"status": "not_found", "document": ..., "candidates": [...], "message": ...}
+    {"status": "invalid_reference", "document": ..., "message": ...}
+    {"status": "unsupported_extension", "document": ..., "message": ...}
 """
 
 from __future__ import annotations
@@ -34,16 +33,9 @@ from typing import Dict, List, Optional, Tuple, Union
 from src.tools import config_loader
 from src.tools.config_loader import PROJECT_ROOT
 
-# Master switch: flip to True (and implement _execute_ingestion) once the
-# ingestion workflow is ready to be triggered by the orchestrator.
-# The actual execution entry point now lives in
-# src/ingestion/ingestion_orchestrator.py (run_ingestion / run_ingestion_file).
-EXECUTE_INGESTION = False
-
-# Result statuses (stable strings the orchestrator can route on)
-STATUS_READY = "ready"                          # document found but not ingested
-STATUS_INGESTED = "ingested"                    # document found and ingestion ran
-STATUS_NO_FILE = "no_file"                      # document not found -> "nope"
+# Result statuses (stable strings callers route on)
+STATUS_FOUND = "found"                          # document resolved
+STATUS_NO_FILE = "not_found"                    # document not found
 STATUS_INVALID_REFERENCE = "invalid_reference"  # unusable document argument
 STATUS_UNSUPPORTED_EXTENSION = "unsupported_extension"  # extension not mapped
 
@@ -171,43 +163,27 @@ def _find_in_documents(name: str, documents_root: Path, extensions: Dict[str, st
     return None
 
 
-def _execute_ingestion(path: Path) -> dict:
-    """Trigger the real ingestion workflow — INTENTIONALLY NOT WIRED YET.
-
-    The actual execution now lives in the ingestion orchestrator; when this
-    tool is finally allowed to trigger ingestion, the stub becomes::
-
-        from src.ingestion.ingestion_orchestrator import run_ingestion_file
-        return run_ingestion_file(path)
-    """
-    raise NotImplementedError(
-        "Ingestion execution is not wired yet; only file resolution is active."
-    )
-
-
-# TODO: ingest_document is supposed to be a straightforward tool but it is
-# reduced to a file existence checked. Would be renamed accordingly.
-def ingest_document(
+def resolve_document(
     document: str,
     *,
     documents_root: Optional[Union[str, Path]] = None,
     extensions: Optional[Dict[str, str]] = None,
 ) -> dict:
-    """Resolve a document by name and trigger its ingestion.
+    """Resolve a document reference to its path in the documents tree.
 
     Args:
-        document: File name as referenced by the LLM, e.g. ``"meow.pdf"``
-            (quotes tolerated). Paths and traversal are rejected.
+        document: file name, e.g. ``"meow.pdf"`` (quotes tolerated). Paths
+            and traversal are rejected — references are bare names.
         documents_root: Override of the documents root (tests / tooling
             only); defaults to ingestion.yaml ``documents_root``.
         extensions: Override of the extension->subfolder mapping (tests /
             tooling only); defaults to ingestion.yaml ``extensions``.
 
     Returns:
-        A dict the orchestrator can hand back to the LLM::
+        A dict::
 
             {
-                "status": "ready" | "ingested" | "no_file"
+                "status": "found" | "not_found"
                           | "invalid_reference" | "unsupported_extension",
                 "document": <requested name>,
                 "path": <resolved path, when found>,
@@ -258,16 +234,9 @@ def ingest_document(
                 result["candidates"] = candidates
         return result
 
-    if not EXECUTE_INGESTION:
-        # Dry-run: the document exists, ingestion is stubbed.
-        return {
-            "status": STATUS_READY,
-            "document": name,
-            "path": str(path),
-            "message": "document found; ingestion is not wired yet (dry-run)",
-        }
-
-    result = _execute_ingestion(path)
-    result.setdefault("document", name)
-    result.setdefault("path", str(path))
-    return result
+    return {
+        "status": STATUS_FOUND,
+        "document": name,
+        "path": str(path),
+        "message": "document found",
+    }

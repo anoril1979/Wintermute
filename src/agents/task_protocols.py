@@ -7,11 +7,14 @@ over the structured requests produced by the request analyzer and hands
 each one to the task agent matching its kind:
 
 * ``RetrievalTaskAgent``  — answer a question from the ingested corpus
-  (delegates to the future retrieval orchestrator);
-* ``IngestionTaskAgent``  — ingest a document (delegates to the ingestion
-  orchestrator, src/ingestion/ingestion_orchestrator.py);
+  (delegates to the retrieval orchestrator);
 * ``GeneralTaskAgent``    — fallback: try to answer or cleanly reject
-  requests outside the system's scope.
+  requests outside the system's scope; this is also where a prompt that
+  asks for ingestion lands — ingestion is a CLI operation, never routed.
+
+The contracts share the outcome vocabulary of the ingestion agents
+(``AgentResult`` / ``AgentStatus`` / ``FailureDomain``), so the routing
+graph can report uniformly whatever the dispatched agent produced.
 
 The contracts share the outcome vocabulary of the ingestion agents
 (``AgentResult`` / ``AgentStatus`` / ``FailureDomain``), so the routing
@@ -27,10 +30,8 @@ from src.agents.protocols import AgentResult
 
 #: Registry keys the routing graph looks task agents up under.
 #: Keyed by request scope label (the wire vocabulary the graph emits):
-#: "ingestion" -> ingestion_task, "retrieval" -> retrieval_task,
-#: "general" -> general_task.
+#: "retrieval" -> retrieval_task, "general" -> general_task.
 TASK_AGENT_KEYS = {
-    "ingestion": "ingestion_task",
     "retrieval": "retrieval_task",
     "general": "general_task",
 }
@@ -53,10 +54,10 @@ class UserTaskAgent(Protocol):
         Args:
             context: the routing context shared by the whole request batch.
             request: one of the request models (src/routing/models.py:
-                IngestionRequest / RetrievalRequest / GeneralRequest) to
-                handle. Typed as ``object`` here to avoid an import cycle
-                — the request models belong to the routing layer, which
-                depends on this package; implementations narrow the type.
+                RetrievalRequest / GeneralRequest) to handle. Typed as
+                ``object`` here to avoid an import cycle — the request
+                models belong to the routing layer, which depends on this
+                package; implementations narrow the type.
 
         Returns:
             The agent's outcome; ``payload`` carries whatever the caller
@@ -78,18 +79,6 @@ class RetrievalTaskAgent(UserTaskAgent, Protocol):
 
     Will delegate to the retrieval orchestrator (retrieval_graph) once it
     exists; until then implementations may report not-implemented.
-    """
-
-
-@runtime_checkable
-class IngestionTaskAgent(UserTaskAgent, Protocol):
-    """Ingests a document referenced by a structured ingestion request.
-
-    Implementations prepare and start the ingestion orchestrator
-    (``src.ingestion.ingestion_orchestrator.run_ingestion_file``) — the
-    cleanest seam: the task agent translates the structured request into
-    an orchestrator call, and the orchestrator owns the rest (config gate,
-    graph, checkpoints).
     """
 
 

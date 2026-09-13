@@ -3,15 +3,16 @@
 Calls the ``request_analyzer`` role (config/llm.yaml) with the analysis
 prompt (prompts/routing/request_analysis.md) plus the raw user prompt, and
 validates the answer into a grouped :class:`AnalysisResult`
-(src/routing/models.py): ``{"ingestion": [...], "retrieval": [...],
-"general": [...]}`` — with retrieval lookups already fully classified
-(``lookup_kind``) and self-contained questions, and ingestion intents
-carrying the stated origin/force/redo_summaries.
+(src/routing/models.py): ``{"retrieval": [...], "general": [...]}`` —
+with retrieval lookups already fully classified (``lookup_kind``) and
+self-contained questions.
 
 **One analysis, no re-routing**: pronouns are resolved here, at analysis
-time — nothing downstream re-reads the user's words. Ingestion and
-retrieval pipelines are deterministic Python; the only LLM-based
-post-routing worker is the GeneralTaskAgent (and later the AnswerAgent).
+time — nothing downstream re-reads the user's words. The retrieval
+pipeline is deterministic Python; the only LLM-based post-routing worker
+is the GeneralTaskAgent (and later the AnswerAgent). Ingestion is not a
+scope: a prompt that asks for ingestion in conversation yields a
+``general`` request (ingestion is a CLI operation, scripts/ingest.py).
 
 A failure here — Ollama unreachable, malformed JSON answer,
 schema-violating requests — raises :class:`RequestAnalysisError`, which
@@ -143,9 +144,8 @@ class RequestAnalyzer:
 
         logger.info(
             "Analyzed prompt into %d request(s) "
-            "(ingestion=%d, retrieval=%d, general=%d).",
+            "(retrieval=%d, general=%d).",
             result.request_count,
-            len(result.ingestion),
             len(result.retrieval),
             len(result.general),
         )

@@ -45,10 +45,12 @@ class _LoggingTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
         # Hermetic setup.yaml: no real file logging side effects unless a
-        # test opts in via _configure_with_file().
+        # test opts in via _configure_with_file(). The patch target is the
+        # validated section loader (load_logging_config); these tests
+        # exercise behavior, not schema validation.
         patcher = unittest.mock.patch(
-            "src.tools.config_loader.load_setup_config",
-            return_value={"logging": {"level": "INFO", "file": ""}},
+            "src.tools.config_loader.load_logging_config",
+            return_value={"level": "INFO", "main_log": ""},
         )
         self.config_mock = patcher.start()
         self.addCleanup(patcher.stop)
@@ -76,12 +78,10 @@ class _LoggingTestCase(unittest.TestCase):
         """Configure logging with a file target inside self.tmp; return path."""
         log_path = self.tmp / name
         self.config_mock.return_value = {
-            "logging": {
-                "level": "INFO",
-                "file": str(log_path),
-                "max_bytes": 100000,
-                "backup_count": 2,
-            }
+            "level": "INFO",
+            "main_log": str(log_path),
+            "max_bytes": 100000,
+            "backup_count": 2,
         }
         configure_logging(force=True)
         return log_path
@@ -115,7 +115,7 @@ class ConfigureLoggingTest(_LoggingTestCase):
 
     def test_force_reconfiguration_closes_the_old_file(self) -> None:
         first = self._configure_with_file("first.log")
-        self.config_mock.return_value = {"logging": {"level": "INFO", "file": ""}}
+        self.config_mock.return_value = {"level": "INFO", "main_log": ""}
         configure_logging(force=True)  # drop to file-less config
 
         self.assertFalse(any(
@@ -124,7 +124,7 @@ class ConfigureLoggingTest(_LoggingTestCase):
         self.assertTrue(first.exists())  # old file still on disk
 
     def test_file_logging_can_be_disabled(self) -> None:
-        self.config_mock.return_value = {"logging": {"level": "INFO", "file": ""}}
+        self.config_mock.return_value = {"level": "INFO", "main_log": ""}
         configure_logging(force=True)
         self.assertIsNone(logging_setup.active_log_file)
 
@@ -140,8 +140,22 @@ class ConfigureLoggingTest(_LoggingTestCase):
             config_loader.PROJECT_ROOT / "data" / "logs" / "wintermute.log",
         )
 
+    def test_schema_invalid_section_falls_back_to_defaults(self) -> None:
+        # A schema-invalid section raises LoggingConfigError from the
+        # loader; logging must survive it the same way as a broken file.
+        self.config_mock.side_effect = __import__(
+            "src.tools.config_loader", fromlist=["LoggingConfigError"]
+        ).LoggingConfigError("setup.yaml invalide (section logging)")
+        with self.assertLogs("src.logging_setup", level="WARNING"):
+            configure_logging(force=True)
+        import src.tools.config_loader as config_loader
+        self.assertEqual(
+            logging_setup.active_log_file,
+            config_loader.PROJECT_ROOT / "data" / "logs" / "wintermute.log",
+        )
+
     def test_level_comes_from_setup_yaml(self) -> None:
-        self.config_mock.return_value = {"logging": {"level": "DEBUG", "file": ""}}
+        self.config_mock.return_value = {"level": "DEBUG", "main_log": ""}
         configure_logging(force=True)
         self.assertEqual(logging.getLogger().level, logging.DEBUG)
 
@@ -248,11 +262,9 @@ class CorrelationIdTest(_LoggingTestCase):
         # A setup.yaml format without %(correlation_id)s must not crash:
         # the filter only stamps the attribute; the format decides.
         self.config_mock.return_value = {
-            "logging": {
-                "level": "INFO",
-                "file": str(self.tmp / "custom.log"),
-                "format": "%(name)s: %(message)s",
-            }
+            "level": "INFO",
+            "main_log": str(self.tmp / "custom.log"),
+            "format": "%(name)s: %(message)s",
         }
         configure_logging(force=True)
         logging.getLogger("test.probe").info("old style")

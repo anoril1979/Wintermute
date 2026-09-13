@@ -8,6 +8,7 @@
 # 2. Extraction output: where the MinerU PDF extractor writes
 #    its artifacts and how its JSON output file is named.
 # 3. Summarization: LLM summaries persistence + size settings.
+# 4. CLI logging: where the ingest/remove scripts write their durable log.
 # ============================================================
 
 # Root folder where ingestable documents live (relative to the
@@ -81,6 +82,11 @@ summarization_output_dir: "data/summarized"
 # re-summarization on the next ingestion.
 summarization_job_file: "data/cache/summarization_jobs.json"
 
-
 summary_min_chars: 1000
 summary_max_chars: 2500
+
+# 4. CLI logging — durable log of the ingestion CLI (scripts/ingest.py,
+#    scripts/remove.py). Every issue, warning and error survives the console
+#    session there. Relative to the project root; absolute paths are also
+#    accepted.
+ingestion_log: "data/logs/ingestion.log"

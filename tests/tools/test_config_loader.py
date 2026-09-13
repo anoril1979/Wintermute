@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 from src.tools.config_loader import (
+    DEFAULT_ORIGINS,
+    DocumentsConfigError,
     IngestionConfigError,
+    LoggingConfigError,
     RetrievalConfigError,
+    coerce_origin,
+    get_default_origin,
+    get_valid_origins,
     load_retrieval_config,
+    validate_documents_config,
     validate_ingestion_config,
+    validate_logging_config,
     validate_retrieval_config,
 )
 
@@ -172,6 +181,45 @@ class ExtractionSettingsValidationTest(unittest.TestCase):
         self.assertEqual(validate_ingestion_config(config), config)
 
 
+class IngestionLogValidationTest(unittest.TestCase):
+    """The ingestion CLI's durable log path (scripts/ingest.py)."""
+
+    def test_valid_path_passes(self):
+        config = _valid_config()
+        config["ingestion_log"] = "data/logs/ingestion.log"
+        self.assertIs(validate_ingestion_config(config), config)
+
+    def test_absolute_path_passes(self):
+        config = _valid_config()
+        config["ingestion_log"] = "D:/logs/ingestion.log"
+        self.assertIs(validate_ingestion_config(config), config)
+
+    def test_absent_key_is_ok(self):
+        config = _valid_config()
+        self.assertIs(validate_ingestion_config(config), config)
+
+    def test_wrong_type_is_named(self):
+        config = _valid_config()
+        config["ingestion_log"] = 7
+        with self.assertRaises(IngestionConfigError) as ctx:
+            validate_ingestion_config(config)
+        self.assertIn("'ingestion_log'", str(ctx.exception))
+
+    def test_empty_value(self):
+        config = _valid_config()
+        config["ingestion_log"] = "   "
+        with self.assertRaises(IngestionConfigError) as ctx:
+            validate_ingestion_config(config)
+        self.assertIn("'ingestion_log'", str(ctx.exception))
+
+    def test_traversal_rejected(self):
+        config = _valid_config()
+        config["ingestion_log"] = "data/../elsewhere/ingestion.log"
+        with self.assertRaises(IngestionConfigError) as ctx:
+            validate_ingestion_config(config)
+        self.assertIn("'ingestion_log'", str(ctx.exception))
+
+
 class NonMappingDocumentTest(unittest.TestCase):
     def test_list_is_rejected(self):
         with self.assertRaises(IngestionConfigError) as ctx:
@@ -270,6 +318,219 @@ class RetrievalConfigValidationTest(unittest.TestCase):
         self.assertGreaterEqual(config["max_top_k"], config["default_top_k"])
         self.assertIsInstance(config.get("query_instruction", ""), str)
         self.assertTrue(config.get("query_instruction", "").startswith("Instruct:"))
+
+
+class DocumentsSectionValidationTest(unittest.TestCase):
+    """setup.yaml's ``documents`` section — the user-defined origin
+    vocabulary (governance labels for ingested documents)."""
+
+    @staticmethod
+    def _section() -> dict:
+        return {"documents": {"origins": ["canon", "community", "rpg"]}}
+
+    def test_valid_section_passes_and_is_returned(self):
+        config = self._section()
+        self.assertIs(validate_documents_config(config), config)
+
+    def test_section_may_be_absent(self):
+        config: dict = {}
+        self.assertIs(validate_documents_config(config), config)
+
+    def test_origins_key_may_be_absent(self):
+        config = {"documents": {}}
+        self.assertIs(validate_documents_config(config), config)
+
+    def test_non_mapping_section_is_rejected(self):
+        with self.assertRaises(DocumentsConfigError) as ctx:
+            validate_documents_config({"documents": ["canon"]})
+        self.assertIn("'documents'", str(ctx.exception))
+
+    def test_empty_origins_list_is_rejected(self):
+        config = {"documents": {"origins": []}}
+        with self.assertRaises(DocumentsConfigError) as ctx:
+            validate_documents_config(config)
+        self.assertIn("'documents.origins'", str(ctx.exception))
+
+    def test_non_list_origins_is_rejected(self):
+        config = {"documents": {"origins": "canon"}}
+        with self.assertRaises(DocumentsConfigError) as ctx:
+            validate_documents_config(config)
+        self.assertIn("'documents.origins'", str(ctx.exception))
+
+    def test_non_string_entry_is_named(self):
+        config = {"documents": {"origins": ["canon", 7]}}
+        with self.assertRaises(DocumentsConfigError) as ctx:
+            validate_documents_config(config)
+        self.assertIn("'documents.origins[1]'", str(ctx.exception))
+
+    def test_blank_entry_is_rejected(self):
+        config = {"documents": {"origins": ["  "]}}
+        with self.assertRaises(DocumentsConfigError) as ctx:
+            validate_documents_config(config)
+        self.assertIn("'documents.origins[0]'", str(ctx.exception))
+
+    def test_duplicate_after_normalization_is_rejected(self):
+        config = {"documents": {"origins": ["Canon", "canon"]}}
+        with self.assertRaises(DocumentsConfigError) as ctx:
+            validate_documents_config(config)
+        self.assertIn("doublon", str(ctx.exception))
+
+
+class OriginVocabularyTest(unittest.TestCase):
+    """The configured vocabulary and its accessors (live setup.yaml)."""
+
+    def test_real_setup_yaml_vocabulary(self):
+        self.assertEqual(get_valid_origins(), ("canon", "community", "rpg"))
+        self.assertEqual(get_default_origin(), "canon")
+
+    def test_coerce_normalizes_and_validates(self):
+        self.assertEqual(coerce_origin(" RPG "), "rpg")
+        self.assertEqual(coerce_origin("Canon"), "canon")
+        self.assertIsNone(coerce_origin("galactic-empire"))
+        self.assertIsNone(coerce_origin(7))
+        self.assertIsNone(coerce_origin(None))
+
+    def test_broken_yaml_fails_open_to_defaults(self):
+        with unittest.mock.patch(
+            "src.tools.config_loader._load_documents_config",
+            side_effect=RuntimeError("broken yaml"),
+        ):
+            self.assertEqual(get_valid_origins(), DEFAULT_ORIGINS)
+            self.assertEqual(get_default_origin(), DEFAULT_ORIGINS[0])
+
+    def test_custom_user_vocabulary_is_honored(self):
+        import src.tools.config_loader as cl
+
+        config = {
+            "documents": {
+                "origins": ["Official", " fan-work ", "homebrew"]
+            }
+        }
+        cl._load_documents_config.cache_clear()
+        try:
+            with unittest.mock.patch.object(
+                cl, "_load_yaml", return_value=config
+            ):
+                self.assertEqual(
+                    get_valid_origins(),
+                    ("official", "fan-work", "homebrew"),
+                )
+                self.assertEqual(get_default_origin(), "official")
+                self.assertEqual(coerce_origin("FAN-WORK"), "fan-work")
+                self.assertIsNone(coerce_origin("rpg"))
+        finally:
+            cl._load_documents_config.cache_clear()
+
+
+class LoggingSectionValidationTest(unittest.TestCase):
+    """setup.yaml's ``logging`` section (main_log, level, format, rotation)."""
+
+    @staticmethod
+    def _section() -> dict:
+        return {
+            "logging": {
+                "level": "DEBUG",
+                "main_log": "data/logs/wintermute.log",
+                "max_bytes": 5242880,
+                "backup_count": 3,
+            }
+        }
+
+    def test_valid_section_passes_and_is_returned(self):
+        config = self._section()
+        self.assertIs(validate_logging_config(config), config)
+
+    def test_section_may_be_absent(self):
+        config: dict = {}
+        self.assertIs(validate_logging_config(config), config)
+
+    def test_empty_main_log_disables_file_logging(self):
+        config = self._section()
+        config["logging"]["main_log"] = ""
+        self.assertIs(validate_logging_config(config), config)
+
+    def test_absolute_main_log_passes(self):
+        config = self._section()
+        config["logging"]["main_log"] = "D:/logs/wintermute.log"
+        self.assertIs(validate_logging_config(config), config)
+
+    def test_non_mapping_section_is_rejected(self):
+        with self.assertRaises(LoggingConfigError) as ctx:
+            validate_logging_config({"logging": ["main_log"]})
+        self.assertIn("'logging'", str(ctx.exception))
+
+    def test_wrong_type_main_log_is_named(self):
+        config = self._section()
+        config["logging"]["main_log"] = 7
+        with self.assertRaises(LoggingConfigError) as ctx:
+            validate_logging_config(config)
+        self.assertIn("'logging.main_log'", str(ctx.exception))
+
+    def test_traversal_main_log_is_rejected(self):
+        config = self._section()
+        config["logging"]["main_log"] = "data/../elsewhere/w.log"
+        with self.assertRaises(LoggingConfigError) as ctx:
+            validate_logging_config(config)
+        self.assertIn("'logging.main_log'", str(ctx.exception))
+
+    def test_unknown_level_is_rejected(self):
+        config = self._section()
+        config["logging"]["level"] = "LOUD"
+        with self.assertRaises(LoggingConfigError) as ctx:
+            validate_logging_config(config)
+        self.assertIn("'logging.level'", str(ctx.exception))
+
+    def test_level_is_case_insensitive(self):
+        config = self._section()
+        config["logging"]["level"] = "info"
+        self.assertIs(validate_logging_config(config), config)
+
+    def test_non_string_format_is_rejected(self):
+        config = self._section()
+        config["logging"]["format"] = 12
+        with self.assertRaises(LoggingConfigError) as ctx:
+            validate_logging_config(config)
+        self.assertIn("'logging.format'", str(ctx.exception))
+
+    def test_format_with_unknown_field_is_rejected(self):
+        config = self._section()
+        config["logging"]["format"] = "%(nope)s"
+        with self.assertRaises(LoggingConfigError) as ctx:
+            validate_logging_config(config)
+        self.assertIn("'logging.format'", str(ctx.exception))
+
+    def test_bool_max_bytes_is_rejected(self):
+        config = self._section()
+        config["logging"]["max_bytes"] = True  # a bool IS an int in Python
+        with self.assertRaises(LoggingConfigError) as ctx:
+            validate_logging_config(config)
+        self.assertIn("'logging.max_bytes'", str(ctx.exception))
+
+    def test_non_positive_max_bytes_is_rejected(self):
+        config = self._section()
+        config["logging"]["max_bytes"] = 0
+        with self.assertRaises(LoggingConfigError):
+            validate_logging_config(config)
+
+    def test_negative_backup_count_is_rejected(self):
+        config = self._section()
+        config["logging"]["backup_count"] = -1
+        with self.assertRaises(LoggingConfigError):
+            validate_logging_config(config)
+
+    def test_zero_backup_count_means_no_rotation(self):
+        config = self._section()
+        config["logging"]["backup_count"] = 0
+        self.assertIs(validate_logging_config(config), config)
+
+    def test_real_setup_yaml_loads(self):
+        """The shipped setup.yaml must pass its own validation."""
+        from src.tools.config_loader import load_logging_config
+
+        section = load_logging_config()
+        self.assertEqual(
+            section.get("main_log"), "data/logs/wintermute.log"
+        )
 
 
 if __name__ == "__main__":

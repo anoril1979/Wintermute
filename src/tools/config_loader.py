@@ -10,9 +10,11 @@ Ce module est le point d'entrée unique pour accéder à la configuration
 depuis le reste du projet (tools/ et engine/).
 """
 
+import logging
 import os
 from pathlib import Path
 from functools import lru_cache
+from typing import Optional
 # lru_cache rend la config quasi-singleton :
 # pratique pour un prototype, mais pour recharger la config à chaud sans redémarrer le service,
 # il faudra retirer ce cache ou ajouter une fonction reload().
@@ -93,6 +95,27 @@ class RetrievalConfigError(ConfigError):
     Raised at load time by ``validate_retrieval_config``. Messages are
     written to be forwarded verbatim to the user (or to the calling LLM)
     so the yaml can be fixed without a debugger.
+    """
+
+
+class LoggingConfigError(ConfigError):
+    """setup.yaml's ``logging`` section is malformed or incomplete.
+
+    Raised by ``validate_logging_config`` with a message naming the faulty
+    entry, so the yaml can be fixed by hand. Note: ``configure_logging``
+    treats a validation failure as "unreadable config" and falls back to
+    defaults — logging must never take the application down.
+    """
+
+
+class DocumentsConfigError(ConfigError):
+    """setup.yaml's ``documents`` section is malformed or incomplete.
+
+    Raised by ``validate_documents_config`` with a message naming the
+    faulty entry. The ``origins`` list is the user-defined governance
+    vocabulary for document origins; every origin check in the system
+    (CLI, orchestrator gate, extraction agent, JSON store, retrieval
+    filters) reads it through :func:`get_valid_origins`.
     """
 
 
@@ -376,7 +399,10 @@ def validate_ingestion_config(config: object) -> dict:
     * optional summarization settings ``summary_min_chars`` and
       ``summary_max_chars`` are strictly positive numbers when present
       (the summarizer copies content below the first one verbatim and
-      targets the second one).
+      targets the second one);
+    * optional ``ingestion_log`` is a string, usable (non-traversal) path
+      reference when present — the durable log of the ingestion CLI
+      (scripts/ingest.py, scripts/remove.py).
 
     Returns the same dict on success, so callers can do
     ``config = validate_ingestion_config(config)``.
@@ -485,6 +511,25 @@ def validate_ingestion_config(config: object) -> dict:
                 f"(valeur : {value!r})."
             )
 
+    # -- optional CLI log path -----------------------------------------------
+    if "ingestion_log" in config:
+        value = config["ingestion_log"]
+        if not isinstance(value, str):
+            raise IngestionConfigError(
+                f"{prefix} : 'ingestion_log' doit être une chaîne "
+                f"(type trouvé : {type(value).__name__})."
+            )
+        if not value.strip():
+            raise IngestionConfigError(
+                f"{prefix} : 'ingestion_log' ne doit pas être vide "
+                "(supprimez la clé pour utiliser la valeur par défaut)."
+            )
+        if not _is_valid_relative_path(value):
+            raise IngestionConfigError(
+                f"{prefix} : 'ingestion_log' ({value!r}) n'est pas un "
+                "chemin utilisable (vide ou contient '..')."
+            )
+
     # -- optional extraction settings ---------------------------------------
     for key in ("extraction_output_dir", "extraction_mineru_output_dir",
                 "summarization_output_dir",
@@ -537,7 +582,8 @@ def load_ingestion_config() -> dict:
     bac de travail de MinerU, mineru_json_extension,
     extraction_job_file) et de résumé (summary_min_chars — copie
     verbatim sous la limite, summary_max_chars — cible de taille des
-    résumés LLM).
+    résumés LLM), plus le journal durable de la CLI d'ingestion
+    (ingestion_log).
 
     Lève IngestionConfigError (sous-classe de ConfigError) avec un message
     explicite désignant l'entrée fautive dès que le fichier est mal formé —
@@ -756,6 +802,258 @@ def load_routing_config() -> dict:
             routing.get("max_requests_per_prompt", 8)
         )
     }
+
+
+# ------------------------------------------------------------------
+# setup.yaml — validation et chargement de la section logging
+# ------------------------------------------------------------------
+
+def validate_logging_config(config: object) -> dict:
+    """Validate setup.yaml's ``logging`` section; raise LoggingConfigError.
+
+    The section is optional (an absent section keeps every default, see
+    ``load_logging_config``); when present it is validated strictly:
+
+    * ``level`` (optional) is one of the logging level names
+      (DEBUG/INFO/WARNING/ERROR/CRITICAL), case-insensitive;
+    * ``format`` (optional) is a string — validated as a *usable* format:
+      applying it to a probe record must not raise;
+    * ``main_log`` (optional) is either an empty string (file logging
+      disabled) or a usable (non-traversal) path reference — the durable
+      main log, resolved against the project root when relative;
+    * ``max_bytes`` (optional) is a strictly positive int — a bool is
+      rejected explicitly (a ``bool`` is an ``int`` in Python);
+    * ``backup_count`` (optional) is a non-negative int (0 = no rotation,
+      the file is just truncated).
+
+    Returns the same dict on success, so callers can do
+    ``config = validate_logging_config(config)``.
+    """
+    prefix = "setup.yaml invalide (section logging)"
+
+    if not isinstance(config, dict):
+        raise LoggingConfigError(
+            f"{prefix}: le contenu doit être un mapping YAML "
+            f"(type trouvé : {type(config).__name__})."
+        )
+
+    if "logging" not in config:
+        return config
+    settings = config["logging"]
+    if not isinstance(settings, dict):
+        raise LoggingConfigError(
+            f"{prefix} : 'logging' doit être un mapping "
+            f"(type trouvé : {type(settings).__name__})."
+        )
+
+    if "level" in settings:
+        level = settings["level"]
+        if not isinstance(level, str) or not level.strip() or \
+                getattr(logging, level.strip().upper(), None) is None:
+            raise LoggingConfigError(
+                f"{prefix} : 'logging.level' ({level!r}) doit être un nom de "
+                "niveau Python (DEBUG, INFO, WARNING, ERROR, CRITICAL)."
+            )
+
+    if "format" in settings:
+        fmt = settings["format"]
+        if not isinstance(fmt, str):
+            raise LoggingConfigError(
+                f"{prefix} : 'logging.format' doit être une chaîne "
+                f"(type trouvé : {type(fmt).__name__})."
+            )
+        try:
+            fmt % {"asctime": "", "correlation_id": "-", "name": "",
+                   "levelname": "", "message": ""}
+        except (KeyError, ValueError, TypeError) as exc:
+            raise LoggingConfigError(
+                f"{prefix} : 'logging.format' ({fmt!r}) n'est pas un format "
+                "utilisable (champ inconnu ou syntaxe invalide)."
+            ) from exc
+
+    if "main_log" in settings:
+        path = settings["main_log"]
+        if not isinstance(path, str):
+            raise LoggingConfigError(
+                f"{prefix} : 'logging.main_log' doit être une chaîne "
+                f"(type trouvé : {type(path).__name__})."
+            )
+        # "" = file logging disabled: a legitimate, documented value.
+        if path.strip() and not _is_valid_relative_path(path):
+            raise LoggingConfigError(
+                f"{prefix} : 'logging.main_log' ({path!r}) n'est pas un "
+                "chemin utilisable (vide ou contient '..')."
+            )
+
+    if "max_bytes" in settings:
+        max_bytes = settings["max_bytes"]
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) \
+                or max_bytes <= 0:
+            raise LoggingConfigError(
+                f"{prefix} : 'logging.max_bytes' doit être un entier "
+                f"strictement positif (valeur : {max_bytes!r})."
+            )
+
+    if "backup_count" in settings:
+        backups = settings["backup_count"]
+        if isinstance(backups, bool) or not isinstance(backups, int) \
+                or backups < 0:
+            raise LoggingConfigError(
+                f"{prefix} : 'logging.backup_count' doit être un entier "
+                "positif ou nul (valeur : "
+                f"{backups!r} ; 0 = pas de rotation)."
+            )
+
+    return config
+
+
+def load_logging_config() -> dict:
+    """Load setup.yaml and return its validated ``logging`` section.
+
+    The section is optional; an absent section (or absent key) yields the
+    same defaults ``configure_logging`` historically applied — DEBUG
+    console level is NOT defaulted here (level default stays INFO, as in
+    ``configure_logging``), ``main_log`` defaults to
+    ``data/logs/wintermute.log``, rotation 5 MiB / 3 backups.
+
+    Malformed present values raise LoggingConfigError (a ConfigError
+    subclass) naming the faulty entry. Cached: read and validated once
+    per program run.
+    """
+    config = _load_yaml(SETUP_YAML_PATH)
+    validate_logging_config(config)
+    return config.get("logging") or {}
+
+
+# ------------------------------------------------------------------
+# setup.yaml — validation et chargement de la section documents
+# (vocabulaire d'origines défini par l'utilisateur)
+# ------------------------------------------------------------------
+
+#: Fallback vocabulary used only when setup.yaml provides no usable
+#: ``documents.origins`` list (section absent, malformed, or schema-invalid).
+#: Mirrors the historical hardcoded trio so a minimal setup.yaml keeps
+#: working; any real deployment should declare its own list.
+DEFAULT_ORIGINS = ("canon", "community", "rpg")
+
+
+def validate_documents_config(config: object) -> dict:
+    """Validate setup.yaml's ``documents`` section; raise DocumentsConfigError.
+
+    The section is optional (an absent section keeps the default origin
+    vocabulary, see ``DEFAULT_ORIGINS``); when present it is validated:
+
+    * ``origins`` (optional) is a list of 1..N non-empty strings — the
+      user-defined governance vocabulary for document origins. Entries are
+      normalized on read (trimmed, lowercased, unicode NFKC) and must be
+      unique after normalization; duplicates would silently collapse two
+      governance categories into one.
+
+    Returns the same dict on success, so callers can do
+    ``config = validate_documents_config(config)``.
+    """
+    prefix = "setup.yaml invalide (section documents)"
+
+    if not isinstance(config, dict):
+        raise DocumentsConfigError(
+            f"{prefix}: le contenu doit être un mapping YAML "
+            f"(type trouvé : {type(config).__name__})."
+        )
+
+    if "documents" not in config:
+        return config
+    documents = config["documents"]
+    if not isinstance(documents, dict):
+        raise DocumentsConfigError(
+            f"{prefix} : 'documents' doit être un mapping "
+            f"(type trouvé : {type(documents).__name__})."
+        )
+
+    if "origins" not in documents:
+        return config
+    origins = documents["origins"]
+    if not isinstance(origins, list) or not origins:
+        raise DocumentsConfigError(
+            f"{prefix} : 'documents.origins' doit être une liste non vide "
+            "d'origines (ex. [canon, community, rpg]) — c'est le vocabulaire "
+            "de gouvernance que vous définissez pour vos documents."
+        )
+
+    seen: set = set()
+    for i, raw in enumerate(origins):
+        if not isinstance(raw, str):
+            raise DocumentsConfigError(
+                f"{prefix} : 'documents.origins[{i}]' doit être une chaîne "
+                f"(type trouvé : {type(raw).__name__})."
+            )
+        normalized = str(raw).strip().lower()
+        if not normalized:
+            raise DocumentsConfigError(
+                f"{prefix} : 'documents.origins[{i}]' ne doit pas être vide "
+                "(ou uniquement des espaces)."
+            )
+        if normalized in seen:
+            raise DocumentsConfigError(
+                f"{prefix} : 'documents.origins[{i}]' ({raw!r}) est un "
+                "doublon (après normalisation minuscules) d'une entrée "
+                "précédente — deux origines doivent être distinctes."
+            )
+        seen.add(normalized)
+
+    return config
+
+
+@lru_cache(maxsize=1)
+def _load_documents_config() -> dict:
+    """Load setup.yaml and return its ``documents`` section (validated).
+
+    Returns {} when the section is absent. Cached like the other loaders.
+    """
+    config = _load_yaml(SETUP_YAML_PATH)
+    validate_documents_config(config)
+    return config.get("documents") or {}
+
+
+def get_valid_origins() -> tuple:
+    """The user-defined origin vocabulary, normalized (lowercase strings).
+
+    Single source of truth for every origin check in the system: the CLI's
+    ``--origin`` choices, the orchestrator's gate, the extraction agent's
+    stamping, the JSON store's loader and the retrieval filters all consult
+    this. The first configured entry is the conventional default. Fails
+    open to :data:`DEFAULT_ORIGINS` when the yaml is broken — refusing to
+    ingest because the governance list is unreadable would be worse than
+    running with the documented fallback (the orchestrator's config gate
+    surfaces real schema errors to the user anyway).
+    """
+    try:
+        origins = _load_documents_config().get("origins")
+    except Exception:  # noqa: BLE001 — a broken yaml must not brick ingestion
+        return DEFAULT_ORIGINS
+    if not isinstance(origins, list) or not origins:
+        return DEFAULT_ORIGINS
+    normalized = tuple(
+        dict.fromkeys(str(o).strip().lower() for o in origins if str(o).strip())
+    )
+    return normalized or DEFAULT_ORIGINS
+
+
+def get_default_origin() -> str:
+    """The conventional default origin: the FIRST configured entry."""
+    return get_valid_origins()[0]
+
+
+def coerce_origin(value: object) -> Optional[str]:
+    """Normalize a user-provided origin against the configured vocabulary.
+
+    Returns the normalized label, or ``None`` when ``value`` is not one of
+    the configured origins (unknown values are REJECTED, never guessed —
+    governance metadata must not be silently rewritten).
+    """
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in get_valid_origins() else None
 
 
 # ------------------------------------------------------------------

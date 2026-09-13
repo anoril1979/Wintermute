@@ -102,6 +102,43 @@ class RoundTripTest(unittest.TestCase):
         self.assertEqual(restored, doc)
 
 
+class OriginFieldTest(unittest.TestCase):
+    """The origin is a user-defined governance label (setup.yaml
+    documents.origins): stored verbatim, validated on load."""
+
+    def test_custom_origin_survives_roundtrip(self):
+        import src.tools.config_loader as cl
+
+        section = {"origins": ["fan-work", "homebrew"]}
+        with mock.patch.object(cl, "_load_documents_config", return_value=section):
+            doc = make_document()
+            doc.origin = "homebrew"
+            data = document_extract_to_json_dict(doc)
+            self.assertEqual(data["origin"], "homebrew")
+            restored = document_extract_from_json_dict(data)
+            self.assertEqual(restored.origin, "homebrew")
+
+    def test_missing_origin_gets_configured_default(self):
+        import src.tools.config_loader as cl
+
+        section = {"origins": ["fan-work", "other"]}
+        with mock.patch.object(cl, "_load_documents_config", return_value=section):
+            doc = make_document()
+            data = document_extract_to_json_dict(doc)
+            del data["origin"]  # legacy hand-written file
+            restored = document_extract_from_json_dict(data)
+            self.assertEqual(restored.origin, "fan-work")  # first entry
+
+    def test_out_of_vocabulary_origin_is_rejected(self):
+        doc = make_document()
+        data = document_extract_to_json_dict(doc)
+        data["origin"] = "galactic-empire"
+        with self.assertRaises(ExtractJsonError) as ctx:
+            document_extract_from_json_dict(data)
+        self.assertIn("galactic-empire", str(ctx.exception))
+        self.assertIn("canon", str(ctx.exception))  # configured vocabulary named
+
+
 class DefensiveLoadTest(unittest.TestCase):
     """The canonical file may be hand-edited: every malformed entry must be
     reported with an explicit locator, never guessed."""

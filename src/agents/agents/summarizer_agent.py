@@ -501,12 +501,12 @@ class SummarizerAgent(LLMRoleAgent):
         stored_origin = getattr(stored_document, "origin", None)
         if stored_origin is not None and stored_origin != document.origin:
             context.emit("task", "summarized_origin_stale",
-                         f"document origin changed ({stored_origin.value} -> "
-                         f"{document.origin.value}): stored summaries were "
+                         f"document origin changed ({stored_origin} -> "
+                         f"{document.origin}): stored summaries were "
                          "computed under the previous origin; re-summarizing",
                          document=name,
-                         stored_origin=stored_origin.value,
-                         current_origin=document.origin.value)
+                         stored_origin=str(stored_origin),
+                         current_origin=document.origin)
             return None
 
         # Fingerprints match: apply the stored summaries in place.

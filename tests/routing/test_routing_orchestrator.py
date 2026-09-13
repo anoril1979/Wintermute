@@ -9,7 +9,7 @@ from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.routing.models import (
     AnalysisResult,
     GeneralRequest,
-    IngestionRequest,
+    RetrievalRequest,
 )
 from src.routing.request_analyzer import RequestAnalysisError
 from src.routing.routing_orchestrator import (
@@ -35,8 +35,8 @@ class FakeAnalyzer:
         return self.result
 
 
-def _ingestion_result(document="a.pdf"):
-    return AnalysisResult(ingestion=[IngestionRequest(document=document)])
+def _retrieval_result(question="what is stored?"):
+    return AnalysisResult(retrieval=[RetrievalRequest(question=question)])
 
 
 def _general_result():
@@ -104,7 +104,7 @@ class RunRoutingTest(unittest.TestCase):
             side_effect=ConfigError("missing role"),
         ):
             result = run_routing(
-                "anything", analyzer=FakeAnalyzer(_ingestion_result()), agents=None
+                "anything", analyzer=FakeAnalyzer(_retrieval_result()), agents=None
             )
         self.assertEqual(result["status"], STATUS_ANALYSIS_ERROR)
         self.assertEqual(result["cause"], "config")
@@ -113,7 +113,7 @@ class RunRoutingTest(unittest.TestCase):
         result = run_routing(
             "anything",
             analyzer=FakeAnalyzer(AnalysisResult(
-                ingestion=[IngestionRequest(document="a.pdf")],
+                retrieval=[RetrievalRequest(question="r")],
                 general=[GeneralRequest(question="hi")],
             )),
             agents={},
@@ -124,7 +124,7 @@ class RunRoutingTest(unittest.TestCase):
         ]
         self.assertEqual(len(understood), 1)
         self.assertEqual(understood[0]["data"]["groups"],
-                         {"ingestion": 1, "retrieval": 0, "general": 1})
+                         {"retrieval": 1, "general": 1})
 
 
 if __name__ == "__main__":

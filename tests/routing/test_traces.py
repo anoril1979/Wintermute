@@ -1,4 +1,8 @@
-"""Tests for routing trace events (context emitter + wire mapping)."""
+"""Tests for routing trace events (context emitter + wire mapping).
+
+Post-paradigm change: no ingestion requests exist — the FakeAnalyzer
+group helper and the memory tests use retrieval + general requests only.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +14,12 @@ from fastapi.testclient import TestClient
 
 import app.api as api
 import src.routing.routing_orchestrator as routing_orchestrator_module
-from src.agents.agents.ingestion_task_agent import IngestionTaskAgent
 from src.agents.contexts import RoutingContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.graphs import RoutingGraph
 from src.routing.models import (
     AnalysisResult,
     GeneralRequest,
-    IngestionRequest,
     RetrievalRequest,
 )
 
@@ -29,15 +31,15 @@ class FakeAnalyzer:
     def analyze(self, prompt):
         result = AnalysisResult()
         for request in self.requests:
-            if isinstance(request, IngestionRequest):
-                result.ingestion.append(request)
+            if isinstance(request, RetrievalRequest):
+                result.retrieval.append(request)
             else:
                 result.general.append(request)
         return result
 
 
-def _ingestion(document="a.pdf"):
-    return IngestionRequest(utterance="ingest it", document=document)
+def _retrieval(question="what is in the corpus?"):
+    return RetrievalRequest(utterance=question, question=question)
 
 
 def _general(utterance="hello"):
@@ -58,13 +60,13 @@ class EmitTest(unittest.TestCase):
     def test_emit_appends_and_calls_observer(self):
         seen = []
         context = RoutingContext(request="x", on_event=seen.append)
-        context.emit("analysis", "understood", "2 requests", kinds=["ingestion"])
+        context.emit("analysis", "understood", "2 requests", kinds=["retrieval"])
         self.assertEqual(len(context.events), 1)
         event = context.events[0]
         self.assertEqual(event["phase"], "analysis")
         self.assertEqual(event["kind"], "understood")
         self.assertEqual(event["message"], "2 requests")
-        self.assertEqual(event["data"], {"kinds": ["ingestion"]})
+        self.assertEqual(event["data"], {"kinds": ["retrieval"]})
         self.assertEqual(seen, [event])
 
     def test_observer_failure_is_swallowed_but_event_kept(self):
@@ -77,7 +79,7 @@ class EmitTest(unittest.TestCase):
 
     def test_no_observer_is_fine(self):
         context = RoutingContext(request="x")
-        context.emit("task", "ingestion_start", "go")
+        context.emit("task", "retrieval_start", "go")
         self.assertEqual(len(context.events), 1)
 
 
@@ -85,8 +87,8 @@ class OrchestratorTracesTest(unittest.TestCase):
     def test_traces_returned_and_ordered(self):
         result = routing_orchestrator_module.run_routing(
             "anything",
-            analyzer=FakeAnalyzer(requests=[_ingestion(), _general()]),
-            agents={"ingestion_task": OkAgent()},
+            analyzer=FakeAnalyzer(requests=[_retrieval(), _general()]),
+            agents={"retrieval_task": OkAgent()},
         )
         self.assertEqual(result["status"], "handled")
         kinds = [(t["phase"], t["kind"]) for t in result["traces"]]
@@ -136,23 +138,23 @@ class PromptLocalMemoryTest(unittest.TestCase):
     """The graph attaches same-prompt predecessors to each request."""
 
     def test_first_request_has_no_preceding(self):
-        requests = [_ingestion("a.pdf"), _general()]
+        requests = [_retrieval("what is stored?"), _general()]
         graph = RoutingGraph(agents={"general_task": OkAgent()})
         graph.run(RoutingContext(request="x"), requests)
         self.assertEqual(requests[0].preceding, [])
 
     def test_preceding_carries_utterance_and_outcome(self):
-        # "ingest a.pdf, then <general about it>": the general request must
-        # see the ingestion's utterance AND its dispatch outcome.
-        requests = [_ingestion("a.pdf"), _general("is it indexed?")]
+        # "ask the corpus, then <general about it>": the general request
+        # must see the retrieval's utterance AND its dispatch outcome.
+        requests = [_retrieval("what is stored?"), _general("is it indexed?")]
         graph = RoutingGraph(agents={
-            "ingestion_task": OkAgent(),
+            "retrieval_task": OkAgent(),
             "general_task": OkAgent(),
         })
         graph.run(RoutingContext(request="x"), requests)
         entry = requests[1].preceding[0]
-        self.assertEqual(entry.kind, "ingestion")
-        self.assertEqual(entry.utterance, "ingest it")
+        self.assertEqual(entry.kind, "retrieval")
+        self.assertEqual(entry.utterance, "what is stored?")
         self.assertEqual(entry.status, "done")
         self.assertEqual(entry.detail, "done")
 
@@ -171,9 +173,9 @@ class PromptLocalMemoryTest(unittest.TestCase):
             def validate(self, context, request):
                 return None
 
-        requests = [_ingestion("a.pdf"), _general("so, is it in?")]
+        requests = [_retrieval("what is stored?"), _general("so, is it in?")]
         graph = RoutingGraph(agents={
-            "ingestion_task": FailAgent(),
+            "retrieval_task": FailAgent(),
             "general_task": OkAgent(),
         })
         graph.run(RoutingContext(request="x"), requests)
@@ -182,39 +184,13 @@ class PromptLocalMemoryTest(unittest.TestCase):
         self.assertEqual(entry.detail, "boom")
 
     def test_local_context_trace_emitted(self):
-        requests = [_ingestion("a.pdf"), _general()]
+        requests = [_retrieval("what is stored?"), _general()]
         context = RoutingContext(request="x")
         graph = RoutingGraph(agents={"general_task": OkAgent()})
         graph.run(context, requests)
         local = [t for t in context.events if t["kind"] == "local_context"]
         self.assertEqual(len(local), 1)
         self.assertEqual(local[0]["data"]["index"], 1)
-
-
-class AgentTraceTest(unittest.TestCase):
-    def test_ingestion_agent_emits_task_traces(self):
-        context = RoutingContext(request="x")
-        agent = IngestionTaskAgent(
-            runner=lambda path, force=False, **kw: {"status": "accepted"}
-        )
-        with unittest.mock.patch(
-            "src.tools.ingest_tool.ingest_document",
-            return_value={"status": "ready", "path": "x/a.pdf"},
-        ):
-            agent.run(context, _ingestion())
-        kinds = [t["kind"] for t in context.events if t["phase"] == "task"]
-        self.assertEqual(kinds, ["ingestion_start", "ingestion_done"])
-
-    def test_refused_document_emits_refusal_trace(self):
-        context = RoutingContext(request="x")
-        agent = IngestionTaskAgent(runner=lambda path, force=False, **kw: {})
-        with unittest.mock.patch(
-            "src.tools.ingest_tool.ingest_document",
-            return_value={"status": "no_file", "message": "nope"},
-        ):
-            agent.run(context, _ingestion())
-        kinds = [t["kind"] for t in context.events if t["phase"] == "task"]
-        self.assertEqual(kinds, ["ingestion_refused"])
 
 
 class StreamingWireTest(unittest.TestCase):
@@ -227,22 +203,20 @@ class StreamingWireTest(unittest.TestCase):
     def tearDown(self):
         routing_orchestrator_module.RequestAnalyzer = self._orig
 
-    def _patch_tool(self, candidates):
-        return unittest.mock.patch(
-            "src.tools.ingest_tool.ingest_document",
-            return_value={"status": "no_file", "message": "nope",
-                          "candidates": candidates},
-        )
-
     def test_sse_thinking_then_content_then_done(self):
         # run_routing builds RequestAnalyzer() itself: patch with a factory.
         routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer(
-            requests=[_ingestion()]
+            requests=[_retrieval()]
         )
-        with self._patch_tool(["A.pdf"]):
+        # Hermetic: a stub agent serves the retrieval request (the default
+        # registry would build the real RetrievalTaskAgent).
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.build_default_task_agents",
+            return_value={"retrieval_task": OkAgent()},
+        ):
             response = self.client.post(
                 "/v1/chat/completions",
-                json={"messages": [{"role": "user", "content": "ingest a.pdf"}],
+                json={"messages": [{"role": "user", "content": "what is stored?"}],
                       "stream": True},
             )
         lines = [l[6:] for l in response.text.splitlines() if l.startswith("data: ")]
@@ -260,12 +234,15 @@ class StreamingWireTest(unittest.TestCase):
 
     def test_ndjson_thinking_then_content_then_done(self):
         routing_orchestrator_module.RequestAnalyzer = lambda: FakeAnalyzer(
-            requests=[_ingestion()]
+            requests=[_retrieval()]
         )
-        with self._patch_tool(["A.pdf"]):
+        with unittest.mock.patch(
+            "src.routing.routing_orchestrator.build_default_task_agents",
+            return_value={"retrieval_task": OkAgent()},
+        ):
             response = self.client.post(
                 "/api/chat",
-                json={"messages": [{"role": "user", "content": "ingest a.pdf"}],
+                json={"messages": [{"role": "user", "content": "what is stored?"}],
                       "stream": True},
             )
         payloads = [json.loads(x) for x in response.text.splitlines() if x.strip()]

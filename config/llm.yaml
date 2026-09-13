@@ -31,30 +31,11 @@ models:
     max_retries: 2
     description: "Classifie l'intention utilisateur (résumé, alerte, question agenda, recherche libre)"
 
-  # Rôle dédié au routage des requêtes d'ingestion : validation des
-  # requêtes utilisateur et conversion en tâches structurées pour
-  # l'orchestrateur d'ingestion.
-  # (Placeholder — l'agent de validation sera implémenté plus tard ; le
-  # Classifie une requête d'ingestion utilisateur (intention : première
-  # ingestion / re-ingestion forcée / résumés à refaire) et formule les
-  # demandes de clarification. Voir src/ingestion/ingestion_router.py et
-  # prompts/routing/ingestion_intent.md / ingestion_clarification.md.
-  ingestion_router:
-    model_name: "llama3:8b"
-    temperature: 0.0
-    max_response_tokens: 256
-    timeout_seconds: 15
-    top_p: 0.95
-    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
-    keep_alive: "5m"
-    thinking: false             # mode raisonnement (option Ollama think)
-    max_retries: 2
-    description: "Valide les requêtes d'ingestion et les convertit en tâches structurées pour l'orchestrateur d'ingestion"
-
   # Rôle dédié à l'orchestrateur de routage (src/routing) : analyse du
   # prompt utilisateur brut, explosion en requêtes structurées
-  # (IngestionRequest / RetrievalRequest / GeneralRequest) grouped by scope
-  # (ingestion / retrieval / general).
+  # (RetrievalRequest / GeneralRequest) grouped by scope
+  # (retrieval / general). Ingestion n'est PAS un scope : l'ingestion de
+  # documents est une opération CLI (scripts/ingest.py), hors du chat.
   # Valeurs placeholder : à régler par l'utilisateur.
   request_analyzer:
     model_name: "qwen3"
@@ -66,7 +47,7 @@ models:
     keep_alive: "5m"
     thinking: false             # mode raisonnement (option Ollama think)
     max_retries: 2
-    description: "Analyse le prompt utilisateur, l'explose en requêtes structurées et les classe (ingestion / retrieval / general)"
+    description: "Analyse le prompt utilisateur, l'explose en requêtes structurées et les classe (retrieval / general)"
 
   # Rôle dédié au GeneralTaskAgent (src/agents/agents/general_task_agent.py):
   # réponses aux requêtes hors périmètre (small talk, culture générale,

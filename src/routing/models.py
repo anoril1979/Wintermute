@@ -5,10 +5,6 @@ request_analysis.md) reads the raw user prompt ONCE and extracts **every**
 request it holds, grouped by scope. The output shape is::
 
     {
-      "ingestion": [
-        {"document": "meow.pdf", "force": false, "redo_summaries": false,
-         "origin": null}
-      ],
       "retrieval": [
         {"lookup_kind": "semantic|index|relation|summary|listing",
          "question": "...", "document": null, "chapter_title": null,
@@ -16,32 +12,29 @@ request it holds, grouped by scope. The output shape is::
       ],
       "general": [
         {"question": "..."}
-      ],
-      "origin": null,             # prompt-level origin shorthand
-      "force": false,             # prompt-level force shorthand
-      "redo_summaries": false     # prompt-level shorthand
+      ]
     }
+
+**No ingestion scope.** Since the paradigm change, document ingestion is a
+CLI operation (scripts/ingest.py) and is deliberately unreachable from
+the chat: no LLM analysis, no routing, no task agent ever ingests. When a
+user asks Wintermute to ingest in conversation, the analyzer emits a
+``general`` request — the general agent explains how ingestion actually
+works. This keeps the router deterministic about storage: it can never
+again hallucinate a file name into a phantom ingestion order (the
+vif-argent incident) because the ingestion shape does not exist.
 
 **One analysis, no re-routing.** The analyzer has the full prompt context:
 pronouns are resolved HERE — a retrieval ``question`` must be
 self-contained ("tell me more about the King of the North", not "tell me
-more about him"), an ingestion ``document`` must be the bare file name.
-Nothing downstream re-reads the user's words: the ingestion and retrieval
-pipelines are deterministic Python (facts → decision table → graph); the
+more about him"). Nothing downstream re-reads the user's words: the
+retrieval pipeline is deterministic Python (decision table → graph); the
 only LLM-based post-routing worker is the GeneralTaskAgent (and later the
 AnswerAgent).
 
 The dispatcher (routing graph) runs the flattened requests in **grouped
-scope order** — all ingestions, then all retrievals, then generals — so
-"ingest X, then ask about it" works without the analyzer doing anything
-special. :meth:`AnalysisResult.flattened` implements that order.
-
-An ingestion request **without a document is invalid at the source**: the
-analyzer must either name the file or leave the request out — "ingest some
-documents" is not dispatchable. (The old per-request degradation is gone:
-with a single analysis there is no second LLM pass to ask the user
-anything; an unusable request is rejected with its utterance, and the
-batch continues.)
+scope order** — all retrievals, then all generals.
+:meth:`AnalysisResult.flattened` implements that order.
 
 **Prompt-local memory** is dispatcher-owned (``preceding``): the routing
 graph attaches, to every dispatched request, the entries of the requests
@@ -71,9 +64,8 @@ logger = logging.getLogger(__name__)
 
 
 class RequestScope(str, Enum):
-    """The three dispatch scopes (execution order: ingestion > retrieval > general)."""
+    """The two dispatch scopes (execution order: retrieval > general)."""
 
-    INGESTION = "ingestion"
     RETRIEVAL = "retrieval"
     GENERAL = "general"
 
@@ -107,61 +99,6 @@ class RequestContextEntry(_StrictModel):
     utterance: str
     status: Optional[str] = None
     detail: str = ""
-
-
-class IngestionRequest(_StrictModel):
-    """One ingestion order: a document plus its intent modifiers.
-
-    ``origin`` is echoed ONLY when the user stated it ("it is a canon
-    document"); ``None`` means unstated — the deterministic origin
-    decision (stored > filename inference > ask) happens in the task
-    agent, never a guess from the LLM.
-    """
-
-    document: str = Field(min_length=1)
-    force: bool = False
-    redo_summaries: bool = False
-    origin: Optional[str] = None
-    utterance: str = ""
-    # Dispatcher-owned (the routing graph fills it from the dispatch
-    # history); the analyzer must never emit it — parse_analysis strips
-    # hallucinated values at the boundary.
-    preceding: List[RequestContextEntry] = Field(default_factory=list)
-
-    @field_validator("document")
-    @classmethod
-    def _document_is_bare_name(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("document must not be blank")
-        if "/" in value or "\\" in value or ".." in value or ":" in value:
-            raise ValueError(
-                f"document must be a bare file name, got path-like {value!r}"
-            )
-        return value
-
-    @field_validator("origin")
-    @classmethod
-    def _origin_known_kind(cls, value: Optional[str]) -> Optional[str]:
-        """Only the three canonical origins are acceptable; None = unstated."""
-        if value is None:
-            return None
-        cleaned = value.strip().lower()
-        if cleaned not in {"canon", "community", "rpg"}:
-            raise ValueError(
-                "origin must be one of 'canon', 'community', 'rpg' "
-                f"(or null), got {value!r}"
-            )
-        return cleaned
-
-    def summary(self) -> dict:
-        return {
-            "document": self.document,
-            "force": self.force,
-            "redo_summaries": self.redo_summaries,
-            "origin": self.origin,
-            "utterance": self.utterance,
-        }
 
 
 class RetrievalRequest(_StrictModel):
@@ -243,36 +180,19 @@ class GeneralRequest(_StrictModel):
 class AnalysisResult(_StrictModel):
     """The whole analyzer answer: requests grouped by scope.
 
-    ``force``/``redo_summaries``/``origin`` are prompt-level shorthands:
-    they apply to every ingestion request that does not override them
-    ("ingest both files again, they're community docs" — stated once).
-    :meth:`flattened` produces the dispatch order.
+    Ingestion is deliberately absent (see module docstring): a prompt that
+    asks for ingestion in conversation yields a ``general`` request — the
+    general agent explains the CLI workflow. :meth:`flattened` produces
+    the dispatch order.
     """
 
-    ingestion: List[IngestionRequest] = Field(default_factory=list)
     retrieval: List[RetrievalRequest] = Field(default_factory=list)
     general: List[GeneralRequest] = Field(default_factory=list)
-    force: bool = False
-    redo_summaries: bool = False
-    origin: Optional[str] = None
-
-    @field_validator("origin")
-    @classmethod
-    def _origin_known_kind(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        cleaned = value.strip().lower()
-        if cleaned not in {"canon", "community", "rpg"}:
-            raise ValueError(
-                "origin must be one of 'canon', 'community', 'rpg' "
-                f"(or null), got {value!r}"
-            )
-        return cleaned
 
     @model_validator(mode="after")
     def _cap_requests(self) -> "AnalysisResult":
         cap = max_requests_per_prompt()
-        total = len(self.ingestion) + len(self.retrieval) + len(self.general)
+        total = len(self.retrieval) + len(self.general)
         if total > cap:
             raise ValueError(
                 f"the prompt yielded {total} requests (max {cap} per "
@@ -283,37 +203,19 @@ class AnalysisResult(_StrictModel):
 
     @property
     def request_count(self) -> int:
-        return len(self.ingestion) + len(self.retrieval) + len(self.general)
+        return len(self.retrieval) + len(self.general)
 
     def flattened(self) -> List[object]:
-        """The dispatch order: all ingestions, then retrievals, then generals.
+        """The dispatch order: all retrievals, then generals.
 
-        Deterministic grouped-scope tunnel (the user-confirmed design):
-        "ingest X, then ask about it" works because ingestion requests run
-        first; within a scope the analyzer's order (the user's reading
-        order) is preserved.
+        Deterministic grouped-scope tunnel (the user-confirmed design);
+        within a scope the analyzer's order (the user's reading order) is
+        preserved.
         """
         requests: List[object] = []
-        requests.extend(self.ingestion)
         requests.extend(self.retrieval)
         requests.extend(self.general)
         return requests
-
-    def apply_shorthands(self) -> "AnalysisResult":
-        """Push prompt-level flags down onto ingestion requests.
-
-        A per-request value always wins over the prompt-level shorthand
-        (the shorthand only fills what the request left unstated). Returns
-        ``self`` for chaining.
-        """
-        for request in self.ingestion:
-            if not request.force:
-                request.force = self.force
-            if not request.redo_summaries:
-                request.redo_summaries = self.redo_summaries
-            if request.origin is None:
-                request.origin = self.origin
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -360,116 +262,24 @@ def _extract_json_payload(text: str) -> object:
     return json.loads(candidate)
 
 
-# Ingestion-intent markers: an ingestion request's own ``utterance`` must
-# carry one of these (any language) for the order to be self-consistent.
-# This is NOT routing-by-keywords — routing stays LLM-decided — it is a
-# self-consistency check on the LLM's own output at the parse boundary:
-# a 8B model sometimes fills the rich ``ingestion`` shape "by reflex"
-# (the vif-argent incident: a content question became "vif-argent.pdf").
-_INGESTION_INTENT_RE = re.compile(
-    r"\b(?:"
-    # English
-    r"ingest|re-?ingest|re-?extract|re-?index|import|add file|add the file"
-    r"|reload|re-?load|store|index(?!ing) this|force extraction"
-    # French
-    r"|ingest|ingere|ingère|ajoute|ajouter|charge|charger|recharge"
-    r"|re-?charger|re-?extraire|extraire|indexe|indexer|remplace"
-    r"|mets a jour|mets à jour|met a jour|met à jour"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def _has_ingestion_intent(utterance: str) -> bool:
-    """True when an utterance plausibly asks for document storage/rework."""
-    return bool(_INGESTION_INTENT_RE.search(utterance or ""))
-
-
-def _drop_phantom_ingestions(items: list) -> tuple:
-    """Drop ingestion requests whose own utterance shows no storage intent.
-
-    Second half of the anti-hallucination defense (the first half is the
-    prompt's "never invent an ingestion request" section): when the model
-    hallucinates a file to ingest — typically from an in-world noun in a
-    content question — the phantom's ``utterance`` betrays it: no storage
-    verb anywhere. The item is dropped with a warning and the sibling
-    requests survive, exactly like the Fix-A degradation.
-
-    An empty/missing ``utterance`` cannot be checked and is kept (fail
-    open — tests and CLI callers build items without one).
-    """
-    kept: list = []
-    dropped: list = []
-    for index, item in enumerate(items):
-        if isinstance(item, dict):
-            utterance = str(item.get("utterance") or "")
-            if utterance.strip() and not _has_ingestion_intent(utterance):
-                logger.warning(
-                    "analyzer emitted ingestion[%d] with document %r but no "
-                    "storage intent in the utterance — dropped as a phantom "
-                    "(utterance: %r)",
-                    index, item.get("document"), utterance,
-                )
-                dropped.append(item)
-                continue
-        kept.append(item)
-    return kept, dropped
-
-
-def _degrade_incomplete_ingestion(items: list) -> list:
-    """Fix A defense-in-depth: keep one bad item from killing the batch.
-
-    The prompt forbids unresolvable ingestion orders ("ingest some
-    documents", no document). A disobedient model must not invalidate the
-    sibling requests: an item whose ``document`` is missing/blank/null is
-    converted to a ``general`` request (the general agent asks the user to
-    clarify) instead of failing the whole answer's validation.
-    """
-    kept: list = []
-    degraded: list = []
-    for index, item in enumerate(items):
-        if (
-            isinstance(item, dict)
-            and not str(item.get("document") or "").strip()
-        ):
-            logger.warning(
-                "analyzer emitted ingestion[%d] without a document — "
-                "degraded to a general clarification request: %r",
-                index, item.get("utterance"),
-            )
-            utterance = str(item.get("utterance") or "ingest some documents")
-            degraded.append({
-                "question": utterance,
-                "utterance": utterance,
-            })
-        else:
-            kept.append(item)
-    return kept, degraded
-
-
 def _strip_dispatcher_owned_fields(payload: dict) -> dict:
-    """Drop fields the analyzer must never emit (``preceding``), with a warning."""
-    for scope in ("ingestion", "retrieval", "general"):
+    """Drop fields the analyzer must never emit (``preceding``), with a warning.
+
+    An ``ingestion`` key in the payload is also dropped, with a warning:
+    ingestion is not a dispatchable scope anymore — whatever the model
+    put there cannot be honored, and leaving it would make the validation
+    fail with a less comprehensible unknown-key error.
+    """
+    if "ingestion" in payload:
+        logger.warning(
+            "analyzer emitted an 'ingestion' scope — ingestion is a CLI "
+            "operation, not a dispatchable request; the scope is dropped"
+        )
+        payload.pop("ingestion", None)
+    for scope in ("retrieval", "general"):
         items = payload.get(scope)
         if not isinstance(items, list):
             continue
-        if scope == "ingestion":
-            items, dropped = _drop_phantom_ingestions(items)
-            for phantom in dropped:
-                logger.info(
-                    "phantom ingestion dropped (document %r) — the user's "
-                    "words carry no storage order",
-                    phantom.get("document") if isinstance(phantom, dict) else phantom,
-                )
-            kept, degraded = _degrade_incomplete_ingestion(items)
-            payload["ingestion"] = kept
-            if degraded:
-                general = payload.get("general")
-                if not isinstance(general, list):
-                    general = []
-                    payload["general"] = general
-                general.extend(degraded)
-                items = payload["ingestion"]
         for index, item in enumerate(items):
             if isinstance(item, dict) and "preceding" in item:
                 logger.warning(
@@ -504,8 +314,4 @@ def parse_analysis(raw: str) -> AnalysisResult:
         raise ValueError("analyzer response is not a JSON object")
 
     payload = _strip_dispatcher_owned_fields(payload)
-    result = AnalysisResult.model_validate(payload)
-    # Prompt-level shorthands (force / redo_summaries / origin) resolve
-    # HERE, at the LLM-answer boundary: everything downstream sees final,
-    # per-request values.
-    return result.apply_shorthands()
+    return AnalysisResult.model_validate(payload)

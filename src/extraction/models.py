@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from src.tools.config_loader import get_default_origin
+
 
 class BlockType(str, Enum):
     TEXT = "text"
@@ -34,22 +36,16 @@ class BlockType(str, Enum):
     FOOTER = "footer"
 
 
-class DocumentOrigin(str, Enum):
-    """Where a document comes from — decided BEFORE storage.
+def _configured_default_origin() -> str:
+    """Default origin label, read from setup.yaml at dataclass build time.
 
-    This is governance metadata: when a piece of information is retrieved,
-    its origin tells how much the system (and the user) may trust it and
-    how conflicts are arbitrated (canon beats community beats user-made).
-    It is decided at routing time (user-stated, or confidently inferred
-    from the filename — else the user is asked) and stamped on the
-    DocumentExtract by the extraction agent.
-
-    Values are lowercase strings in JSON stores and vector metadata.
+    The vocabulary is USER-DEFINED (setup.yaml ``documents.origins``); the
+    first configured entry is the conventional default. The indirection
+    keeps the dataclass field's default lazy (a module-level function is
+    evaluated per construction, not at import time) and survives a broken
+    config via the loader's fail-open fallback.
     """
-
-    CANON = "canon"          # official sources of the universe (books, RPG supplements...)
-    COMMUNITY = "community"  # fan-made content (may contradict canon)
-    RPG = "rpg"              # user-created/modified content (private sessions, homebrew)
+    return get_default_origin()
 
 
 @dataclass
@@ -150,12 +146,14 @@ class DocumentExtract:
     the vector chunk id prefix, and the stores' cross-reference. Empty until
     the extraction layer assigns it.
 
-    ``origin``: where the document comes from (``DocumentOrigin``) — canon,
-    community or rpg. Defaults to CANON; the ingestion router is
-    responsible for deciding it (user-stated or confident inference) BEFORE
-    the extraction, and the extraction agent stamps it here. Note the
-    default is a placeholder, not an authority: an unverified default is
-    reported as a warning by the extraction validation.
+    ``origin``: where the document comes from — a governance label from
+    the USER-DEFINED vocabulary (setup.yaml ``documents.origins``; the
+    shipped configuration defines canon / community / rpg, but the list
+    belongs to you). It is decided at ingestion time (explicit ``-o`` on
+    the CLI; an omitted value takes the configured default, reported as
+    unverified) and stamped on the DocumentExtract by the extraction
+    agent. Stored verbatim (lowercased) in JSON stores, vector metadata,
+    and later the SQL and markdown layers.
     """
     id: str = ""
     source_path: str = ""
@@ -163,7 +161,7 @@ class DocumentExtract:
     author: str = ""
     subject: str = ""
     total_pages: int = 0
-    origin: DocumentOrigin = DocumentOrigin.CANON
+    origin: str = field(default_factory=_configured_default_origin)
     toc: list[TocEntry] = field(default_factory=list)
     chapters: list[Chapter] = field(default_factory=list)
     summary: Optional[str] = None  # Résumé (produit par étape suivante du pipeline)

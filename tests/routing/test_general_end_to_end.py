@@ -4,6 +4,9 @@ Covers the full production path minus the LLM itself:
 
     run_routing -> RoutingGraph -> GeneralTaskAgent.run -> payload["answer"]
     -> app.api._compose_reply -> the user-facing text.
+
+Post-paradigm change: an ingestion ask in conversation lands on the
+general agent (ingestion is a CLI operation, never routed).
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from src.agents.agents.general_task_agent import GeneralTaskAgent
 from src.routing.models import (
     AnalysisResult,
     GeneralRequest,
-    IngestionRequest,
+    RetrievalRequest,
 )
 from src.routing.routing_orchestrator import run_routing
 
@@ -29,8 +32,8 @@ class FakeAnalyzer:
     def analyze(self, prompt):
         result = AnalysisResult()
         for request in self.requests:
-            if isinstance(request, IngestionRequest):
-                result.ingestion.append(request)
+            if isinstance(request, RetrievalRequest):
+                result.retrieval.append(request)
             else:
                 result.general.append(request)
         return result
@@ -65,11 +68,11 @@ class GeneralEndToEndTest(unittest.TestCase):
         text, _needs_rag = api._compose_reply(result["results"])
         self.assertIn("color of television", text)
 
-    def test_batch_keeps_general_answer_after_an_ingestion_failure(self):
+    def test_batch_keeps_general_answer_after_a_retrieval_failure(self):
         """One broken request must not poison the general answer."""
 
-        class _FailingIngestion:
-            name = "failing_ingestion"
+        class _FailingRetrieval:
+            name = "failing_retrieval"
 
             def run(self, context, request):
                 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
@@ -84,33 +87,56 @@ class GeneralEndToEndTest(unittest.TestCase):
 
         agent = GeneralTaskAgent(allow_missing_role=True, llm=_FakeLLM("the answer"))
         result = run_routing(
-            "ingest a.pdf then talk to me",
+            "ask the corpus then talk to me",
             analyzer=FakeAnalyzer(requests=[
-                IngestionRequest(utterance="ingest a.pdf", document="a.pdf"),
+                RetrievalRequest(utterance="what is stored?", question="what is stored?"),
                 _general(),
             ]),
-            agents={"ingestion_task": _FailingIngestion(), "general_task": agent},
+            agents={"retrieval_task": _FailingRetrieval(), "general_task": agent},
         )
         statuses = {r["kind"]: r["status"] for r in result["results"]}
-        self.assertEqual(statuses["ingestion"], "rejected")
+        self.assertEqual(statuses["retrieval"], "rejected")
         self.assertEqual(statuses["general"], "done")
         text, _ = api._compose_reply(result["results"])
         self.assertIn("the answer", text)
         self.assertIn("Could not do it", text)
 
-    def test_default_registry_general_request_answers_without_touching_ingest_tool(self):
-        """The default wiring routes general requests; nothing file-related runs."""
+    def test_ingestion_ask_lands_on_the_general_agent(self):
+        """The paradigm change end to end: an ingest ask in conversation
+        reaches the general agent, which explains the CLI workflow — and
+        nothing file-related runs."""
+        agent = GeneralTaskAgent(
+            allow_missing_role=True,
+            llm=_FakeLLM("Ingestion is a command-line operation, human."),
+        )
+        with unittest.mock.patch(
+            "src.tools.ingest_tool.resolve_document"
+        ) as resolve, unittest.mock.patch(
+            "src.ingestion.ingestion_orchestrator.run_ingestion_file"
+        ) as run_ingestion:
+            result = run_routing(
+                "Please ingest meow.pdf",
+                analyzer=FakeAnalyzer(requests=[
+                    _general("Please ingest meow.pdf"),
+                ]),
+                agents={"general_task": agent},
+            )
+        resolve.assert_not_called()
+        run_ingestion.assert_not_called()
+        self.assertEqual(result["status"], "handled")
+        self.assertEqual(result["results"][0]["kind"], "general")
+        text, _ = api._compose_reply(result["results"])
+        self.assertIn("command-line", text)
 
-        with unittest.mock.patch("src.tools.ingest_tool.ingest_document") as ingest, \
-                unittest.mock.patch(
-                    "src.llm.llm_client_ollama.get_llm_client",
-                    return_value=_FakeLLM("Case was a console cowboy."),
-                ):
+    def test_default_registry_general_request_answers(self):
+        with unittest.mock.patch(
+            "src.llm.llm_client_ollama.get_llm_client",
+            return_value=_FakeLLM("Case was a console cowboy."),
+        ):
             result = run_routing(
                 "Who is Case?",
                 analyzer=FakeAnalyzer(requests=[_general("Who is Case?")]),
             )
-        ingest.assert_not_called()
         self.assertEqual(result["status"], "handled")
         self.assertEqual(result["results"][0]["agent"], "general_task")
         self.assertTrue(result["results"][0]["answer"])  # agent payload spread at top level

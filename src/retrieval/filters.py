@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from src.tools.config_loader import get_valid_origins
 from src.indexing.chunks import (
     KIND_CONTENT,
     KIND_SUMMARY,
@@ -54,7 +55,16 @@ ALLOWED_FIELDS = frozenset({
 _LEVELS = frozenset({LEVEL_BLOCK, LEVEL_SECTION, LEVEL_PAGE, LEVEL_CHAPTER,
                      LEVEL_DOCUMENT})
 _KINDS = frozenset({KIND_CONTENT, KIND_SUMMARY})
-_ORIGINS = frozenset({"canon", "community", "rpg"})
+
+
+def _valid_origins() -> frozenset:
+    """The user-defined origin vocabulary (setup.yaml documents.origins).
+
+    Read lazily at validation time — the vocabulary is user-defined and
+    must be re-read per validation, not frozen at import. The loader fails
+    open to its documented default trio when the yaml is broken.
+    """
+    return frozenset(get_valid_origins())
 
 #: Guard against path-like values in free-text scopes ("data/sources/x.pdf"
 #: is not a doc_title; bare names are).
@@ -85,7 +95,8 @@ class RetrievalFilters:
                       matcher below also tries common casings).
         chapter_title: chapter title scope (exact match on the stored
                        metadata, same case caveat as above).
-        origins:      governance filter (subset of canon/community/rpg).
+        origins:      governance filter (subset of the user-defined origin
+                      vocabulary, setup.yaml ``documents.origins``).
         kinds:        content vs summary chunks; None = both.
         levels:       structural levels to keep; None = all.
         doc_ids:      explicit document ids (unified scheme) — used by
@@ -137,7 +148,7 @@ class RetrievalFilters:
         if self.chapter_title is not None:
             _clean_text("chapter_title", self.chapter_title)
         for name, values, allowed in (
-            ("origins", self.origins, _ORIGINS),
+            ("origins", self.origins, _valid_origins()),
             ("kinds", self.kinds, _KINDS),
             ("levels", self.levels, _LEVELS),
         ):

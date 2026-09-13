@@ -6,10 +6,11 @@ orchestrator, test doubles — never on a concrete client. Concrete
 implementations live beside it (``chroma_client.py`` for the store,
 ``embedding_client.py`` for embeddings) and must satisfy these interfaces.
 
-Scope today: **storage + vector retrieval**. ``query_by_vector`` is the
-real query seam (the retrieval layer embeds the question, the store never
-does); text queries and ``delete_document`` remain honest stubs so no
-caller can silently depend on a path that does not exist.
+Scope today: **storage, vector retrieval and index maintenance**.
+``query_by_vector`` is the real query seam (the retrieval layer embeds the
+question, the store never does); text queries remain an honest stub.
+``delete_document`` is real: corpus maintenance (dedup, out-of-corpus
+removal) deletes a document's projection by its unified ``doc_id``.
 
 The ``runtime_checkable`` decorators allow ``isinstance(...)`` sanity checks
 (method presence only — they do not verify signatures).
@@ -128,5 +129,11 @@ class VectorStoreProtocol(Protocol):
         ...
 
     def delete_document(self, doc_id: str) -> int:
-        """Delete every chunk of one document (STUB — NotImplementedError)."""
+        """Delete every chunk of one document, by its unified ``doc_id``.
+
+        Identity-based (metadata filter), never similarity-based: the
+        store is a mirror of the corpus, and this removes one document's
+        whole projection. Returns the number of chunks deleted; 0 for an
+        unknown document (deleting from nothing is not an error).
+        """
         ...

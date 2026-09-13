@@ -116,7 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.warning(
             "Wintermute stays dormant: the vector store is empty or unreadable. "
-            "Run an ingestion first; /health reports details."
+            "Ingest a document first (scripts/ingest.py); /health reports details."
         )
     yield
 
@@ -321,11 +321,11 @@ def _ask(question: str) -> str:
         if sub:
             return str(sub["answer"])
         if str(result.get("status", "")) == "no_corpus":
-            # Dormant memory invites ingestion — never tells the user to
-            # run a script (ingestion itself comes through Wintermute).
+            # Dormant memory tells the user how ingestion actually happens
+            # (the CLI) — the chat cannot ingest anything itself.
             return (
                 "My retrieval memory is dormant: nothing is indexed yet. "
-                "Ask me to ingest a document first, then try again."
+                "Ingest a document first (scripts/ingest.py), then try again."
             )
         return str(result.get("message") or _brain_unavailable_text())
     except Exception:
@@ -339,8 +339,9 @@ def _ask(question: str) -> str:
 # ---------------------------------------------------------------------------
 # Routing — every user message first goes through the routing orchestrator
 # (src/routing), which analyzes the prompt into structured requests and
-# dispatches them (ingestion -> the ingestion orchestrator, retrieval ->
-# the retrieval pipeline, general -> fallback).
+# dispatches them (retrieval -> the deterministic retrieval pipeline,
+# general -> the GeneralTaskAgent). Ingestion is NOT routable: it lives in
+# scripts/ingest.py (deterministic CLI), by design.
 # ---------------------------------------------------------------------------
 
 def _compose_reply(results: list) -> tuple:
@@ -360,18 +361,13 @@ def _compose_reply(results: list) -> tuple:
         if kind == "retrieval" and status == "not_implemented":
             needs_rag = True  # answered by the retrieval pipeline instead
             continue
-        if status in ("incomplete", "set_aside"):
-            # Underspecified request (or origin the system refuses to
-            # guess): a question for the user, not a failure.
+        if status == "incomplete":
+            # Underspecified request: a question for the user, not a
+            # failure.
             lines.append(f"**More information needed**: {detail}")
             continue
         if status == "done":
-            if kind == "ingestion":
-                ingestion = result.get("ingestion") or {}
-                document = ingestion.get("document") or ingestion.get("path") or ""
-                steps = ", ".join(ingestion.get("completed_steps", [])) or "no step completed"
-                lines.append(f"Ingestion completed for '{document}' (steps: {steps}).")
-            elif kind == "retrieval" and detail:
+            if kind == "retrieval" and detail:
                 # The answer agent's phrased reply (grounded, cited) —
                 # never a bare chunk-count status line. A retrieval with
                 # no phrased answer still carries its detail.
@@ -386,18 +382,16 @@ def _compose_reply(results: list) -> tuple:
 
 
 def _failure_line(kind: str, detail: str, result: dict) -> str:
-    """User-facing text for a failed request, enriched when useful.
+    """User-facing text for a failed request.
 
-    A failed ingestion whose document was not found carries ``candidates``
-    (from the ingest tool's resolution, via the task agent payload): they
-    are listed so the user can pick the right name — a bare "no file"
-    forces the user to guess the nomenclature twice.
+    A failed retrieval whose reference was not found may carry
+    ``candidates`` in its payload: they are listed so the user can pick
+    the right name — a bare "no such document" forces the user to guess
+    the nomenclature twice.
     """
-    if kind != "ingestion":
-        return f"**Could not do it**: {detail}"
-    ingestion = result.get("ingestion") or {}
-    resolution = ingestion.get("resolution") or result.get("resolution") or {}
-    candidates = resolution.get("candidates") or []
+    payload = result.get("retrieval") or result.get("resolution") or {}
+    resolution = payload.get("resolution") if isinstance(payload, dict) else {}
+    candidates = (resolution or {}).get("candidates") or []
     if not candidates:
         return f"**Could not do it**: {detail}"
     listed = "\n\n".join(f" + {name}" for name in candidates)
@@ -644,9 +638,10 @@ def list_models():
 
 @app.post("/v1/chat/completions")
 def chat(request: ChatCompletionRequest, http_request: Request) -> dict:
-    """OpenAI-dialect chat. The message is routed first (ingestion orders
-    are executed, retrieval questions fall through to the RAG chain), so
-    the answer comes from what the user actually asked for.
+    """OpenAI-dialect chat. The message is routed first (retrieval
+    questions go to the deterministic retrieval pipeline, general chat to
+    the GeneralTaskAgent), so the answer comes from what the user actually
+    asked for.
 
     When ``stream`` is true, routing traces stream live as
     ``delta.reasoning_content`` (the DeepSeek-R1 convention Open WebUI

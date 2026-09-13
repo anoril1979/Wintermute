@@ -278,11 +278,14 @@ class OrchestratorPlugTest(unittest.TestCase):
         self.assertIn("corrupted", result["failure_detail"])
 
     def test_agents_none_resolves_to_default_registry(self):
-        from src.ingestion.ingestion_orchestrator import _resolve_agents
-        registry = _resolve_agents(None)
+        """``agents=None`` builds the default registry (post-paradigm
+        wiring helper: :func:`_build_registry_gracefully`); an explicit
+        (even empty) dict always wins."""
+        from src.ingestion.ingestion_orchestrator import _build_registry_gracefully
+
+        registry = _build_registry_gracefully(None)
         self.assertIn("content_extractor", registry)
-        # An explicit (even empty) dict always wins.
-        self.assertEqual(_resolve_agents({}), {})
+        self.assertEqual(_build_registry_gracefully({}), {})
 
 
 if __name__ == "__main__":

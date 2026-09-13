@@ -31,94 +31,62 @@ def _raw(payload: dict) -> str:
     return json.dumps(payload)
 
 
-class FixAIngestionWithoutDocumentTest(unittest.TestCase):
-    """Fix A: a documentless ingestion request degrades per request."""
+class IngestionScopeDroppedTest(unittest.TestCase):
+    """Post-paradigm shape: the analyzer has no ingestion scope.
 
-    def test_documentless_ingestion_degrades_to_general(self):
+    The old fix A contract (documentless ingestion degrades to a general
+    request per item) is superseded: ingestion is a CLI operation, so the
+    whole ``ingestion`` scope is dropped at the parse boundary — a chat
+    request to ingest becomes a general request only when the ANALYZER
+    (per its prompt) classifies it that way, never through degradation.
+    """
+
+    def test_documentless_ingestion_is_dropped_not_degraded(self):
         raw = _raw({
             "ingestion": [{"utterance": "ingest some documents"}],
             "retrieval": [],
             "general": [],
         })
-        result = parse_analysis(raw)
-        self.assertEqual(len(result.ingestion), 0)
-        self.assertEqual(len(result.general), 1)
-        self.assertIn("ingest some documents", result.general[0].question)
+        with self.assertLogs("src.routing.models", level="WARNING"):
+            result = parse_analysis(raw)
+        self.assertEqual(result.request_count, 0)
 
-    def test_documentless_ingestion_batch_still_parses_with_siblings(self):
-        """The regression from the incident: one documentless ingestion must
-        not destroy the general request that accompanied it."""
+    def test_ingestion_scope_drop_keeps_sibling_scopes(self):
         raw = _raw({
-            "ingestion": [{"utterance": "ingest some documents", "document": None}],
-            "retrieval": [],
+            "ingestion": [{"document": "meow.pdf", "utterance": "ingest meow.pdf"}],
+            "retrieval": [{"question": "who is Jean?", "lookup_kind": "semantic"}],
             "general": [{"question": "Hi Winter!", "utterance": "Hi Winter!"}],
         })
-        result = parse_analysis(raw)
-        self.assertEqual(len(result.ingestion), 0)
-        self.assertEqual(len(result.general), 2)
-        # the degradation lands in the general list, next to the real
-        # general request that accompanied it (existing items first)
-        questions = [r.question for r in result.general]
-        self.assertEqual(questions, ["Hi Winter!", "ingest some documents"])
+        with self.assertLogs("src.routing.models", level="WARNING"):
+            result = parse_analysis(raw)
+        self.assertEqual(len(result.retrieval), 1)
+        self.assertEqual(len(result.general), 1)
 
-    def test_complete_ingestion_still_parses_normally(self):
-        raw = _raw({
-            "ingestion": [{"document": "Dumas.pdf", "utterance": "ingest Dumas.pdf"}],
-            "retrieval": [],
-            "general": [],
-        })
-        result = parse_analysis(raw)
-        self.assertEqual(len(result.ingestion), 1)
-        self.assertEqual(result.ingestion[0].document, "Dumas.pdf")
-        self.assertEqual(len(result.general), 0)
-
-    def test_compose_reply_turns_set_aside_into_a_question(self):
+    def test_unusable_status_lines_come_out_as_could_not_do_it(self):
+        """The failure phrasing (post-paradigm: statuses the routing graph
+        still emits are ``rejected``/``not_implemented``/``done``)."""
         text, needs_rag = api._compose_reply([
-            {"kind": "ingestion", "status": "set_aside",
-             "detail": "origin of 'meow.pdf' is unknown: set aside — not ingested"},
+            {"kind": "general", "status": "rejected",
+             "detail": "no agent for kind 'general'"},
         ])
-        self.assertIn("More information needed", text)
-        self.assertIn("meow.pdf", text)
+        self.assertIn("**Could not do it**", text)
         self.assertFalse(needs_rag)
 
-    def test_set_aside_does_not_poison_sibling_outcomes(self):
-        from src.agents.contexts import RoutingContext
-        from src.graphs.routing_graph import STATUS_SET_ASIDE, RoutingGraph
-        from src.routing.models import GeneralRequest, IngestionRequest
-
-        class _StubTaskAgent:
-            name = "stub"
-
-            def run(self, context, request):
-                from src.agents.protocols import AgentResult, AgentStatus
-
-                return AgentResult(
-                    agent_name=self.name, status=AgentStatus.OK,
-                    detail="handled", payload={"answer": "stub answer"},
-                )
-
-        agent = _StubTaskAgent()
-        graph = RoutingGraph(agents={"general_task": agent})
-        with unittest.mock.patch(
-            "src.tools.ingest_tool.ingest_document",
-            return_value={"status": "ready", "path": "data/sources/pdf/zzz.pdf"},
-        ), unittest.mock.patch(
-            "src.helpers.document_extract_json_store.canonical_path_for",
-            return_value=unittest.mock.Mock(exists=lambda: False),
-        ), unittest.mock.patch(
-            "src.ingestion.ingestion_router.infer_origin",
-            return_value=None,
-        ):
-            outcome = graph.run(
-                RoutingContext(),
-                [
-                    IngestionRequest(document="zzz.pdf"),
-                    GeneralRequest(question="Hi!", utterance="Hi!"),
-                ],
-            )
-
-        statuses = [o.status for o in outcome.outcomes]
-        self.assertEqual(statuses, [STATUS_SET_ASIDE, "done"])
+    def test_analyzer_drops_ingestion_scope_with_warning(self):
+        """Post-paradigm hardening: if a (misbehaving or stale) analyzer
+        answer still carries an ``ingestion`` scope, it is dropped with a
+        warning — ingestion is a CLI operation, never a chat dispatch."""
+        raw = _raw({
+            "ingestion": [{"document": "zzz.pdf", "utterance": "ingest zzz.pdf"}],
+            "retrieval": [],
+            "general": [{"question": "Hi!", "utterance": "Hi!"}],
+        })
+        with self.assertLogs("src.routing.models", level="WARNING"):
+            result = parse_analysis(raw)
+        self.assertFalse(hasattr(result, "ingestion"))
+        self.assertEqual(len(result.retrieval), 0)
+        self.assertEqual(len(result.general), 1)
+        self.assertEqual(result.general[0].question, "Hi!")
 
 
 class FixBAnalysisErrorAnswerTest(unittest.TestCase):

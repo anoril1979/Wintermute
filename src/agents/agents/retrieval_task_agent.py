@@ -81,9 +81,9 @@ class RetrievalTaskAgent:
         result = self._run_retrieval([request], on_event=context.on_event)
 
         # Merge the pipeline's internal traces into the routing context's
-        # event log (same as IngestionTaskAgent): with a live observer they
-        # already streamed through; without one they are collected here so
-        # the returned trace list is complete.
+        # event log: with a live observer they already streamed through;
+        # without one they are collected here so the returned trace list
+        # is complete.
         for event in result.get("traces", []):
             context.events.append(event)
 
