@@ -18,7 +18,10 @@ Related stores moved to their natural homes:
 """
 
 from src.extraction.document_extractor import DocumentExtractor, PDFExtractor
-from src.extraction.mineru_pdf_extractor import MineruPDFExtractor
+from src.extraction.mineru_pdf_extractor import (
+    MineruPDFExtractor,
+    strip_mineru_hyphenation,
+)
 from src.extraction.models import (
     BlockType,
     Chapter,
@@ -45,4 +48,5 @@ __all__ = [
     "TextBlock",
     "TocEntry",
     "document_extract_to_dict",
+    "strip_mineru_hyphenation",
 ]

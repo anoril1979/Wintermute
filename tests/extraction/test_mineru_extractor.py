@@ -19,6 +19,7 @@ from src.extraction import (
     PDFExtractor,
     PDFExtractorProtocol,
     document_extract_to_dict,
+    strip_mineru_hyphenation,
 )
 
 # MinerU-format fixture: flat list of blocks (text/table) with page_idx,
@@ -191,6 +192,117 @@ class MineruExtractorTest(unittest.TestCase):
         self.assertEqual(serialized["total_pages"], 3)
         self.assertEqual(serialized["orphan_page_count"], 1)
         self.assertEqual(len(serialized["chapters"]), 2)
+
+
+class MineruHyphenationTest(unittest.TestCase):
+    """MinerU STX (\x02) line-break hyphenation markers are cleaned.
+
+    MinerU emits ``cre\x02\nvacier`` for a word hyphenated across lines;
+    the cleaned text must flow into blocks, sections, pages, chapters and
+    (downstream) the vector store — never the raw marker.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_rejoins_hyphenated_word(self):
+        self.assertEqual(strip_mineru_hyphenation("cre\x02 vacier"), "crevacier")
+        self.assertEqual(
+            strip_mineru_hyphenation("cre\x02\n        vacier"), "crevacier"
+        )
+
+    def test_rejoins_accented_french_fragments(self):
+        # Real Gazette samples: accented letters around the break.
+        self.assertEqual(
+            strip_mineru_hyphenation("ali\x02 mente"), "alimente"
+        )
+        self.assertEqual(
+            strip_mineru_hyphenation("ter\x02 miner"), "terminer"
+        )
+        self.assertEqual(
+            strip_mineru_hyphenation("conte\x02 nu"), "contenu"
+        )
+
+    def test_drops_bare_marker(self):
+        """A leftover STX with no hyphenation context is layout noise."""
+        self.assertEqual(strip_mineru_hyphenation("chaud\x02ière"), "chaudière")
+        # STX between letters means ONE word split by a line break — even a
+        # terse one: the marker's semantics win over any spacing guess.
+        self.assertEqual(strip_mineru_hyphenation("x\x02 y"), "xy")
+        self.assertEqual(strip_mineru_hyphenation("\x02début"), "début")
+        self.assertEqual(strip_mineru_hyphenation("fin\x02"), "fin")
+
+    def test_preserves_legitimate_dashes(self):
+        """Real dashes around the break must not be glued."""
+        self.assertEqual(
+            strip_mineru_hyphenation("problèmes financiers —\x02 un choix"),
+            "problèmes financiers — un choix",
+        )
+        self.assertEqual(
+            strip_mineru_hyphenation("financiers -\x02 un choix"),
+            "financiers - un choix",
+        )
+
+    def test_text_without_marker_is_untouched(self):
+        original = "Il n'existe qu'un seul crevacier sur Sombre-Terre."
+        self.assertEqual(strip_mineru_hyphenation(original), original)
+
+    def test_transform_pagegroup_cleans_text_and_table_body(self):
+        cleaned = MineruPDFExtractor.transform_pagegroup(
+            {
+                "type": "text",
+                "text": "ali\x02 mente",
+                "bbox": [0, 0, 1, 1],
+                "page_idx": 0,
+            }
+        )
+        self.assertEqual(cleaned["text"], "alimente")
+
+        cleaned_table = MineruPDFExtractor.transform_pagegroup(
+            {
+                "type": "table",
+                "table_body": "ter\x02 miner",
+                "bbox": [0, 0, 1, 1],
+                "page_idx": 0,
+            }
+        )
+        self.assertEqual(cleaned_table["table_body"], "terminer")
+
+    def test_extraction_flow_hyphenation_cleaned_end_to_end(self):
+        """The full extract() flow carries clean text everywhere."""
+        output_dir = self.tmp / "extracted" / "hyphen" / "auto"
+        output_dir.mkdir(parents=True)
+        (output_dir / "hyphen_content_list.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "type": "text",
+                        "page_idx": 0,
+                        "text": "Un cre\x02 vacier ali\x02 mente la page",
+                        "bbox": [0, 0, 100, 20],
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        pdf_path = self.tmp / "hyphen.pdf"
+        build_tiny_pdf(pdf_path)
+        # Same page geometry check as the base fixture (3-page PDF, text on
+        # page_idx 0 only).
+
+        extractor = MineruPDFExtractor(
+            mineru_folder=self.tmp / "extracted", bypass_ocr=True
+        )
+        document = extractor.extract(pdf_path)
+
+        all_raw = " ".join(p.raw_text for p in document.all_pages())
+        self.assertNotIn("\x02", all_raw)
+        self.assertIn("crevacier", all_raw)
+        self.assertIn("alimente", all_raw)
 
 
 class ConfigDrivenDefaultsTest(unittest.TestCase):

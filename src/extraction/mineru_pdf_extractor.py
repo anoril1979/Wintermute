@@ -34,6 +34,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 import subprocess
 from itertools import groupby
 from operator import itemgetter
@@ -56,6 +57,46 @@ from src.tools import config_loader
 from src.tools.config_loader import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# MinerU hyphenation cleanup
+# ---------------------------------------------------------------------------
+
+# MinerU's layout analysis emits an ASCII STX control character (\x02) where
+# a word was hyphenated across a line break, followed by the line break and
+# indentation whitespace: "cre\x02 vacier" is really "crevacier". The data
+# lives in MinerU's own JSON, so the cleanup happens at the single entry
+# point where MinerU blocks enter our models.
+STX = "\x02"
+
+
+def strip_mineru_hyphenation(text: str) -> str:
+    """Rejoin words MinerU hyphenated across line breaks and drop STX markers.
+
+    MinerU marks a line-break hyphenation with a STX control character
+    (``\x02``) before the break, e.g. ``cre\x02\nvacier``. We rejoin the
+    fragments — ``crevacier`` — and strip any leftover marker (a bare STX
+    with no hyphenation context) to keep the stored text clean.
+
+    The rejoining rule (\x02 + any whitespace incl. line breaks → '') is
+    applied only between a lower-case letter and a letter: this preserves
+    legitimate dashes (``financiers — un``) and avoids gluing the second
+    half onto the previous word when the break is mid-word in the source.
+    """
+    if STX not in text:
+        return text
+    # Primary rule: STX between two letters (with optional whitespace) is a
+    # line-break hyphenation → rejoin without hyphen or space.
+    text = re.sub(
+        r"(?<=[a-zà-öø-ÿ])\x02\s*(?=[a-zà-öø-ÿ])",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Fallback: any leftover STX (no letter context, no hyphenation) is
+    # layout noise → remove it and the whitespace it introduced.
+    return text.replace(STX, "")
+
 
 # Fallbacks used when the keys are missing from config/ingestion.yaml.
 # The configuration is the intended source of truth — set them there.
@@ -231,7 +272,17 @@ class MineruPDFExtractor(PDFExtractor):
 
     @staticmethod
     def transform_pagegroup(page_json: dict) -> dict:
-        """Hook invoked for each raw MinerU block (version shims go here)."""
+        """Hook invoked for each raw MinerU block (version shims go here).
+
+        Text hygiene happens here so every downstream consumer — sections,
+        pages, chapters, summaries, vector chunks — derives from clean text:
+        MinerU's line-break hyphenation markers (STX, ``\x02``) are rejoined
+        (``cre\x02 vacier`` → ``crevacier``) and stripped.
+        """
+        if "text" in page_json:
+            page_json["text"] = strip_mineru_hyphenation(page_json["text"])
+        if "table_body" in page_json:
+            page_json["table_body"] = strip_mineru_hyphenation(page_json["table_body"])
         return page_json
 
     @staticmethod
