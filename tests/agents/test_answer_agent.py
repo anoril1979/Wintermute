@@ -174,7 +174,8 @@ class RetrievalGraphAnswerStepTest(unittest.TestCase):
 
         return RetrievalGraph(agents={
             "semantic_retriever": SemanticRetrievalAgent(
-                embedder=StubEmbedder(), store=_fill_store(tmp)),
+                embedder=StubEmbedder(), store=_fill_store(tmp),
+                instruction=""),
             "answerer": AnswerAgent(llm=llm, prompt_path=_prompt_path(tmp)),
         }), tmp
 
@@ -210,7 +211,8 @@ class RetrievalGraphAnswerStepTest(unittest.TestCase):
         self.addCleanup(_sh.rmtree, tmp, ignore_errors=True)
         graph = RetrievalGraph(agents={
             "semantic_retriever": SemanticRetrievalAgent(
-                embedder=StubEmbedder(), store=_fill_store(tmp)),
+                embedder=StubEmbedder(), store=_fill_store(tmp),
+                instruction=""),
         })
         context = self._context(top_k=5)
         outcome = graph.run(context, kind="semantic")
@@ -237,7 +239,8 @@ class RetrievalGraphAnswerStepTest(unittest.TestCase):
         failing_llm.fail = True
         graph = RetrievalGraph(agents={
             "semantic_retriever": SemanticRetrievalAgent(
-                embedder=StubEmbedder(), store=_fill_store(tmp)),
+                embedder=StubEmbedder(), store=_fill_store(tmp),
+                instruction=""),
             "answerer": AnswerAgent(llm=failing_llm,
                                     prompt_path=_prompt_path(tmp)),
         })
@@ -297,7 +300,8 @@ class AnswerSurfacingTest(unittest.TestCase):
 
         result, _ = self._run_pipeline({
             "semantic_retriever": SemanticRetrievalAgent(
-                embedder=StubEmbedder(), store=_fill_store(tmp)),
+                embedder=StubEmbedder(), store=_fill_store(tmp),
+                instruction=""),
             "answerer": AnswerAgent(llm=llm, prompt_path=_prompt_path(tmp)),
         })
         self.assertEqual(result["status"], "ok")

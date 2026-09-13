@@ -246,11 +246,30 @@ class RetrievalConfigValidationTest(unittest.TestCase):
             validate_retrieval_config(config)
         self.assertIn("llm.yaml", str(ctx.exception))
 
+    def test_query_instruction_must_be_a_string(self):
+        config = self._valid_config()
+        config["query_instruction"] = 42
+        with self.assertRaises(RetrievalConfigError) as ctx:
+            validate_retrieval_config(config)
+        self.assertIn("query_instruction", str(ctx.exception))
+
+    def test_query_instruction_accepts_empty_string(self):
+        """Empty = disabled: valid, the agent embeds the raw question."""
+        config = self._valid_config()
+        config["query_instruction"] = ""
+        self.assertIs(validate_retrieval_config(config), config)
+
+    def test_query_instruction_is_optional(self):
+        config = self._valid_config()
+        self.assertIs(validate_retrieval_config(config), config)
+
     def test_real_retrieval_yaml_loads(self):
         """The shipped retrieval.yaml must pass its own validation."""
         config = load_retrieval_config()
         self.assertGreater(config["default_top_k"], 0)
         self.assertGreaterEqual(config["max_top_k"], config["default_top_k"])
+        self.assertIsInstance(config.get("query_instruction", ""), str)
+        self.assertTrue(config.get("query_instruction", "").startswith("Instruct:"))
 
 
 if __name__ == "__main__":

@@ -776,7 +776,10 @@ def validate_retrieval_config(config: object) -> dict:
       role — cross-file consistency is checked here because a typo would
       otherwise surface as a runtime LLM failure;
     * ``source_collection_key`` (required, non-empty string) is a plain
-      name (the key under setup.yaml's ``vector_db.collections``).
+      name (the key under setup.yaml's ``vector_db.collections``);
+    * ``query_instruction`` (optional) is a string when present — the
+      query-side instruction prepended to questions for instruction-aware
+      embedding models; empty disables it.
     """
     prefix = "retrieval.yaml invalide"
 
@@ -863,6 +866,22 @@ def validate_retrieval_config(config: object) -> dict:
             f"{prefix} : 'source_collection_key' ({collection_key!r}) doit être "
             "un nom simple de clé, pas un chemin."
         )
+
+    # -- query_instruction (optional) ------------------------------------------
+    # Query-side instruction for instruction-aware embedding models
+    # (qwen3-embedding: "Instruct: ...\nQuery: ..."). Empty string or an
+    # absent key disables the instruction entirely — a model without a
+    # query protocol must never receive one. A present value must be a
+    # plain string: an instruction is sent VERBATIM to the embedder, so a
+    # non-string type would crash the retrieval agent at query time.
+    if "query_instruction" in config:
+        instruction = config["query_instruction"]
+        if not isinstance(instruction, str):
+            raise RetrievalConfigError(
+                f"{prefix} : 'query_instruction' doit être une chaîne "
+                f"(type trouvé : {type(instruction).__name__}) — vide pour "
+                "désactiver l'instruction."
+            )
 
     return config
 

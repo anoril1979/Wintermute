@@ -151,19 +151,22 @@ class MineruExtractorTest(unittest.TestCase):
 
     def test_chapters_and_orphans(self):
         document = self.extractor.extract(self.pdf_path)
-        # TOC chapters + the fallback "Orphans" chapter for page 1.
-        self.assertEqual(len(document.chapters), 3)
+        # TOC chapters only: pre-TOC pages go to orphan_pages (NOT copied
+        # into a fallback "Orphans" chapter — copying them double-indexed
+        # every orphan block in the vector store).
+        self.assertEqual(len(document.chapters), 2)
         by_title = {c.toc_entry.title: c for c in document.chapters}
 
         self.assertEqual([p.page_number for p in by_title["Chapter One"].pages], [2])
         self.assertEqual([p.page_number for p in by_title["Chapter Two"].pages], [3])
         # Boundary pages are NOT double-assigned (cleaned off-by-one).
         self.assertNotIn(3, [p.page_number for p in by_title["Chapter One"].pages])
+        # No orphan copy of page 1 exists in the chapters.
+        self.assertNotIn("Orphans", by_title)
 
-        orphans = by_title["Orphans"]
-        self.assertEqual([p.page_number for p in orphans.pages], [1])
-        self.assertEqual(document.orphan_pages, orphans.pages)
-        self.assertIn("Cover page intro", orphans.full_text)
+        # Page 1 lives only in orphan_pages.
+        self.assertEqual([p.page_number for p in document.orphan_pages], [1])
+        self.assertIn("Cover page intro", document.orphan_pages[0].raw_text)
 
     def test_chapter_full_text(self):
         document = self.extractor.extract(self.pdf_path)
@@ -187,7 +190,7 @@ class MineruExtractorTest(unittest.TestCase):
         self.assertIn("Chapter One", payload)
         self.assertEqual(serialized["total_pages"], 3)
         self.assertEqual(serialized["orphan_page_count"], 1)
-        self.assertEqual(len(serialized["chapters"]), 3)
+        self.assertEqual(len(serialized["chapters"]), 2)
 
 
 class ConfigDrivenDefaultsTest(unittest.TestCase):

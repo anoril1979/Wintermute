@@ -72,6 +72,30 @@ def min_score() -> float:
     return value if 0.0 <= value <= 1.0 else DEFAULT_MIN_SCORE
 
 
+def query_instruction() -> str:
+    """``query_instruction`` from retrieval.yaml, fail-open to disabled.
+
+    Query-side instruction for instruction-aware embedding models:
+    qwen3-embedding was trained to receive QUERIES wrapped as
+    ``Instruct: <task>\nQuery: <text>`` while DOCUMENTS are embedded raw —
+    Ollama does not apply that format itself, so the agent prepends the
+    configured prefix to the question before calling /api/embed. Empty
+    string (or an absent key / unreadable config) disables it: a model
+    without a query protocol must never receive one.
+    """
+    try:
+        from src.tools.config_loader import load_retrieval_config
+
+        value = load_retrieval_config().get("query_instruction", "")
+    except Exception as exc:  # noqa: BLE001 — fail-open: no instruction
+        logger.warning(
+            "Could not read retrieval.yaml for query_instruction; "
+            "queries will be embedded raw: %s", exc,
+        )
+        return ""
+    return value if isinstance(value, str) else ""
+
+
 class SemanticRetrievalAgent:
     """Answers a semantic request: embed → query → scored hits."""
 
@@ -86,6 +110,7 @@ class SemanticRetrievalAgent:
         output_key: str = OUTPUT_KEY,
         collection_key: Optional[str] = None,
         embedding_role: Optional[str] = None,
+        instruction: Optional[str] = None,
     ) -> None:
         """Args:
         embedder: the embedding client; defaults to the retrieval.yaml
@@ -94,6 +119,12 @@ class SemanticRetrievalAgent:
             ``source_collection_key`` collection (injectable for tests).
         collection_key: override of the retrieval.yaml collection key.
         embedding_role: override of the retrieval.yaml embedding role.
+        instruction: query-side instruction prefix (instruction-aware
+            embedding models like qwen3-embedding expect their QUERIES as
+            ``Instruct: <task>\nQuery: <text>``; documents stay raw).
+            ``None`` (the default) reads retrieval.yaml's
+            ``query_instruction`` — inject a string to force one, ``""``
+            to disable.
         """
         self._embedder = embedder
         self._store = store
@@ -101,6 +132,7 @@ class SemanticRetrievalAgent:
         self._output_key = output_key
         self._collection_key = collection_key
         self._embedding_role = embedding_role
+        self._instruction = instruction
 
     # -- lazily-built clients (config read at build time, not per query) ----
 
@@ -164,8 +196,15 @@ class SemanticRetrievalAgent:
         top_k = int(context.metadata.get("top_k", 6))
 
         # -- embedding (one text: the question) --------------------------------
+        # Query-side instruction (instruction-aware models, e.g.
+        # qwen3-embedding): the PREFIX changes the query vector only — the
+        # stored corpus was embedded raw and stays untouched.
+        instruction = self._instruction
+        if instruction is None:
+            instruction = query_instruction()
+        embed_text = f"{instruction}{question}" if instruction else question
         try:
-            vector = self.embedder.embed([question])[0]
+            vector = self.embedder.embed([embed_text])[0]
         except EmbeddingClientError as exc:
             detail = f"embedding backend failure: {exc}"
             context.emit("task", "retrieval_failed", detail)

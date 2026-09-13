@@ -27,6 +27,17 @@ min_score: 0.45
 # the question with another model would compare incomparable vectors.
 embedding_role: "embedding"
 
+# Query-side instruction for instruction-aware embedding models (asymmetric
+# retrieval). qwen3-embedding was trained to receive QUERIES wrapped as
+# "Instruct: <task>\nQuery: <text>" while DOCUMENTS are embedded raw —
+# Ollama does not apply this format itself, so the retrieval agent prepends
+# this prefix to the question right before the /api/embed call. The stored
+# corpus is untouched (no re-indexing); only query vectors change, so
+# re-tune min_score if you edit or empty this value.
+# Empty string (or an absent key) disables the instruction — keep it empty
+# for embedding models without such a query protocol.
+query_instruction: "Instruct: Given a user query about a tabletop RPG fictional world, retrieve the document passages that answer or discuss it\nQuery: "
+
 # The vector_db.collections key (setup.yaml) holding the source content
 # chunks indexed by the SourceIndexingAgent. Knowledge chunks get their
 # own key when the knowledge layer lands.

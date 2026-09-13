@@ -25,6 +25,7 @@ from src.extraction.models import (
     TocEntry,
 )
 from src.indexing.chroma_client import ChromaVectorClient
+from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
 from src.indexing.chunks import (
     KIND_CONTENT,
     LEVEL_BLOCK,
@@ -70,6 +71,20 @@ class StubEmbedder:
             digest = hashlib.sha256(text.encode("utf-8")).digest()
             vectors.append([b / 255.0 for b in digest[: self.dimension]])
         return vectors
+
+
+class RecordingEmbedder:
+    """Captures the texts it is asked to embed; returns one fixed vector."""
+
+    dimension = 8
+
+    def __init__(self):
+        self.texts: list[str] = []
+        self.vector = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
+    def embed(self, texts):
+        self.texts.extend(texts)
+        return [list(self.vector) for _ in texts]
 
 
 def _doc(title: str = "Gazette Test") -> DocumentExtract:
@@ -366,6 +381,9 @@ class SemanticRetrievalAgentTest(unittest.TestCase):
         self.store = _fill_store(self.tmp)
         self.agent = SemanticRetrievalAgent(
             embedder=self.embedder, store=self.store,
+            # Stub vectors are hash-of-RAW-text based: disable the query
+            # instruction so query and corpus vectors stay comparable.
+            instruction="",
         )
 
     def _context(self, question: str = "the king fled the burning capital",
@@ -427,6 +445,46 @@ class SemanticRetrievalAgentTest(unittest.TestCase):
         for hit in result.payload["hits"]:
             self.assertEqual(hit.metadata["kind"], "summary")
 
+    def test_query_instruction_is_prepended_to_the_embed_text(self):
+        """Instruction-aware models (qwen3-embedding): the query is sent as
+        'Instruct: <task>\nQuery: <text>' — documents stay raw."""
+        embedder = RecordingEmbedder()
+        agent = SemanticRetrievalAgent(
+            embedder=embedder, store=self.store,
+            instruction="Instruct: retrieve passages\nQuery: ",
+        )
+        result = agent.run(
+            self._context(question="Qu'est-ce qu'un crevacier ?"))
+        self.assertEqual(result.status.value, "ok")
+        self.assertEqual(
+            embedder.texts,
+            ["Instruct: retrieve passages\nQuery: Qu'est-ce qu'un crevacier ?"],
+        )
+
+    def test_empty_instruction_embeds_the_raw_question(self):
+        embedder = RecordingEmbedder()
+        agent = SemanticRetrievalAgent(
+            embedder=embedder, store=self.store, instruction="",
+        )
+        result = agent.run(
+            self._context(question="Que sais-tu des chaudières ?"))
+        self.assertEqual(result.status.value, "ok")
+        self.assertEqual(embedder.texts, ["Que sais-tu des chaudières ?"])
+
+    def test_instruction_defaults_to_retrieval_yaml(self):
+        """instruction=None reads retrieval.yaml's query_instruction; the
+        shipped yaml enables it for qwen3-embedding."""
+        from src.tools.config_loader import load_retrieval_config
+
+        embedder = RecordingEmbedder()
+        agent = SemanticRetrievalAgent(
+            embedder=embedder, store=self.store)  # instruction=None
+        result = agent.run(self._context(question="test question"))
+        self.assertEqual(result.status.value, "ok")
+        prefix = load_retrieval_config().get("query_instruction") or ""
+        self.assertEqual(embedder.texts, [f"{prefix}test question"])
+        self.assertTrue(embedder.texts[0].startswith("Instruct:"))
+
     def test_validate_checks_score_order(self):
         context = self._context()
         self.agent.run(context)
@@ -457,7 +515,7 @@ class RetrievalGraphTest(unittest.TestCase):
 
         self.graph = RetrievalGraph(
             agents={"semantic_retriever": SemanticRetrievalAgent(
-                embedder=self.embedder, store=self.store)},
+                embedder=self.embedder, store=self.store, instruction="")},
         )
 
     def _context(self, **metadata):
@@ -538,7 +596,7 @@ class RetrievalOrchestratorTest(unittest.TestCase):
 
         return RetrievalGraph(agents={
             "semantic_retriever": SemanticRetrievalAgent(
-                embedder=self.embedder, store=self.store),
+                embedder=self.embedder, store=self.store, instruction=""),
         })
 
     def _run(self, *questions_or_specs, facts=None, **kwargs):
@@ -750,7 +808,7 @@ class BatchOrchestratorTest(unittest.TestCase):
 
         return RetrievalGraph(agents={
             "semantic_retriever": SemanticRetrievalAgent(
-                embedder=self.embedder, store=self.store),
+                embedder=self.embedder, store=self.store, instruction=""),
         })
 
     def test_king_of_the_north_compound_prompt(self):
