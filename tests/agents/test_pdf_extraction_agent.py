@@ -204,6 +204,22 @@ class OrchestratorPlugTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.pdf_path = Path(self._tmp.name) / "doc.pdf"
         self.pdf_path.write_bytes(b"%PDF-1.4 fake")
+        # Hermetic job files for EVERY agent that records checkpoints: the
+        # graph's default summarizer would otherwise record 'doc.pdf' into
+        # the real data/cache/summarization_jobs.json.
+        self._summarizer_jobs = ExtractionJobFile(
+            self.pdf_path.parent / "summarization_jobs.json"
+        )
+
+    def _registry(self, **overrides):
+        """The default registry with hermetic extraction + summarization
+        stores and the real extractor/indexer swapped for stubs."""
+        from src.agents.agents.summarizer_agent import SummarizerAgent
+
+        registry = build_default_agents()
+        registry["summarizer"] = SummarizerAgent(job_file=self._summarizer_jobs)
+        registry.update(overrides)
+        return registry
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -216,7 +232,7 @@ class OrchestratorPlugTest(unittest.TestCase):
         from src.ingestion.ingestion_orchestrator import run_ingestion_file
 
         stub = StubExtractor(document=make_document(self.pdf_path))
-        registry = build_default_agents()
+        registry = self._registry()
         registry["content_extractor"] = PDFExtractionAgent(
             extractor=stub,
             job_file=ExtractionJobFile(self.pdf_path.parent / "jobs.json"),
@@ -245,7 +261,7 @@ class OrchestratorPlugTest(unittest.TestCase):
         stub = StubExtractor(
             document=make_document(self.pdf_path, with_content=False)
         )
-        registry = build_default_agents()
+        registry = self._registry()
         registry["content_extractor"] = PDFExtractionAgent(
             extractor=stub,
             job_file=ExtractionJobFile(self.pdf_path.parent / "jobs.json"),
@@ -264,7 +280,7 @@ class OrchestratorPlugTest(unittest.TestCase):
         from src.ingestion.ingestion_orchestrator import run_ingestion_file
 
         stub = StubExtractor(exc=FileNotFoundError("corrupted"))
-        registry = build_default_agents()
+        registry = self._registry()
         registry["content_extractor"] = PDFExtractionAgent(
             extractor=stub,
             job_file=ExtractionJobFile(self.pdf_path.parent / "jobs.json"),

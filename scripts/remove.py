@@ -84,7 +84,8 @@ def main(argv: list | None = None) -> int:
         deleted = report["steps"]["vector"].get("deleted", 0)
         logger.info(
             "'%s' (%s) removed from the corpus — %d vector chunk(s) deleted, "
-            "checkpoints and stores cleaned. The source file is kept.",
+            "0 remaining in both collections, checkpoints and stores cleaned. "
+            "The source file is kept.",
             report.get("document"), report.get("doc_id"), deleted,
         )
         return EXIT_OK

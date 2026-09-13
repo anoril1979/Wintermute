@@ -377,16 +377,27 @@ class DocumentsSectionValidationTest(unittest.TestCase):
 
 
 class OriginVocabularyTest(unittest.TestCase):
-    """The configured vocabulary and its accessors (live setup.yaml)."""
+    """The configured vocabulary and its accessors (live setup.yaml).
+
+    Deliberately vocabulary-agnostic: the user defines their own origin
+    labels (the shipped default is canon/community/rpg, but any list is
+    valid), so the tests derive their expectations from the config.
+    """
 
     def test_real_setup_yaml_vocabulary(self):
-        self.assertEqual(get_valid_origins(), ("canon", "community", "rpg"))
-        self.assertEqual(get_default_origin(), "canon")
+        origins = get_valid_origins()
+        self.assertTrue(origins, "the shipped setup.yaml must define origins")
+        self.assertEqual(origins, tuple(o.lower() for o in origins))
+        self.assertEqual(len(origins), len(set(origins)))
+        # First entry = the default origin.
+        self.assertEqual(get_default_origin(), origins[0])
 
     def test_coerce_normalizes_and_validates(self):
-        self.assertEqual(coerce_origin(" RPG "), "rpg")
-        self.assertEqual(coerce_origin("Canon"), "canon")
-        self.assertIsNone(coerce_origin("galactic-empire"))
+        origins = get_valid_origins()
+        probe = origins[-1]
+        self.assertEqual(coerce_origin(f"  {probe.upper()}  "), probe)
+        self.assertEqual(coerce_origin(origins[0].capitalize()), origins[0])
+        self.assertIsNone(coerce_origin("definitely-not-a-configured-origin"))
         self.assertIsNone(coerce_origin(7))
         self.assertIsNone(coerce_origin(None))
 

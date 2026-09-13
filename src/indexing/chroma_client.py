@@ -75,6 +75,21 @@ def vector_db_config() -> dict:
     return config_loader.load_vector_config()
 
 
+def _resolve_store_path(path: str) -> Path:
+    """Anchor a relative ``vector_db.path`` to the project root.
+
+    setup.yaml paths are relative to the project root (like every other
+    config path in the system), **not** to the current working directory:
+    the API server, the CLI scripts and the tests run from different
+    CWDs, and a CWD-relative store path would make a removal silently
+    operate on an empty store while the real data lives elsewhere (the
+    '0 vector chunk(s) deleted' bug). Absolute paths pass through
+    untouched. ``VectorConfigError`` already rejects ``..`` traversal.
+    """
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else config_loader.PROJECT_ROOT / candidate
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -121,7 +136,7 @@ class ChromaVectorClient:
             )
         self.collection_key = collection_key
         self.embedding_dimension = embedding_dimension
-        self._path = Path(path) if path else Path(self._config["path"])
+        self._path = Path(path) if path else _resolve_store_path(self._config["path"])
         self._collection_name = collection_name or collections[collection_key]
         self._client = None      # embedded ChromaDB client, built lazily
         self._collection = None  # the actual collection handle
@@ -361,6 +376,38 @@ class ChromaVectorClient:
             len(ids), doc_id, self._collection_name,
         )
         return len(ids)
+
+    def count_document(self, doc_id: str) -> int:
+        """Count the chunks of one document currently in the collection.
+
+        Read-only companion of :meth:`delete_document`: same metadata
+        filter (``doc_id``), same semantics — 0 for an unknown document
+        or a store that was never materialized. The corpus-removal engine
+        uses it to VERIFY a deletion actually landed: count before/after
+        turns a silent no-op (wrong store, stale filter...) into an
+        explicit partial failure instead of a reassuring "0 deleted".
+
+        Raises:
+            ValueError: an empty/blank ``doc_id``.
+            VectorStoreError: the query failed.
+        """
+        doc_id = (doc_id or "").strip()
+        if not doc_id:
+            raise ValueError("count_document() requires a non-empty doc_id.")
+        if not self._store_exists():
+            return 0
+
+        collection = self._ensure_collection()
+        try:
+            existing = collection.get(
+                where={"doc_id": {"$eq": doc_id}}, include=[]
+            )
+            return len(list(existing.get("ids") or []))
+        except Exception as exc:
+            raise VectorStoreError(
+                f"ChromaDB count failed on '{self._collection_name}' "
+                f"for doc_id '{doc_id}': {exc}"
+            ) from exc
 
     # -- Internals ---------------------------------------------------------------
 

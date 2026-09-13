@@ -375,7 +375,21 @@ class ChromaQueryTest(unittest.TestCase):
     def test_query_with_non_matching_filter_returns_nothing(self):
         embedder = StubEmbedder()
         query_vector = embedder.embed(["the king"])[0]
-        where = build_where(RetrievalFilters(origins=["rpg"]))
+        # Vocabulary-agnostic: filter on an origin that is valid per the
+        # config but absent from the indexed chunks' metadata.
+        from src.tools.config_loader import get_valid_origins
+
+        from src.retrieval.filters import InvalidFilterError
+
+        absent = [
+            o for o in get_valid_origins()
+            if o != "canon"  # canon is what _doc() is stamped with
+        ]
+        self.assertTrue(absent, "need a configured origin the fixture lacks")
+        try:
+            where = build_where(RetrievalFilters(origins=[absent[-1]]))
+        except InvalidFilterError:
+            self.fail("a configured origin must be a valid filter value")
         self.assertEqual(self.store.query_by_vector(query_vector, top_k=5,
                                                     where=where), [])
 

@@ -7,6 +7,7 @@ oversize warnings, resume behavior, failure domain mapping and validate().
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -63,9 +64,27 @@ class StubSummarizer(SummarizerAgent):
     ``reply`` is one string (every call returns it) or a list (calls consume
     the entries in order, cycling). Use distinctive LONG replies (> the copy
     limit) when a test must observe what one level fed to the next.
+
+    The job file defaults to a throwaway path OUTSIDE the repo: without it,
+    every green run recorded 'x.pdf' into the REAL data/cache/
+    summarization_jobs.json (found while debugging a removal report).
     """
 
+    # Lazily-created shared temp dir; cleaned up by the OS eventually.
+    _hermetic_dir: tempfile.TemporaryDirectory | None = None
+
+    @classmethod
+    def _hermetic_job_file(cls):
+        from src.tools.extraction_job_file import SummarizationJobFile
+
+        if cls._hermetic_dir is None:
+            cls._hermetic_dir = tempfile.TemporaryDirectory()
+        return SummarizationJobFile(
+            Path(cls._hermetic_dir.name) / "summarization_jobs.json"
+        )
+
     def __init__(self, reply: str | list[str] = "SUMMARY.", **kwargs):
+        kwargs.setdefault("job_file", self._hermetic_job_file())
         super().__init__(**kwargs)
         self.replies = list(reply) if isinstance(reply, list) else [reply]
         self.calls = 0

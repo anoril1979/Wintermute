@@ -67,22 +67,41 @@ STATUS_REJECTED = "rejected"  # unusable request (bad reference)
 def _remove_vector_projection(doc_id: str) -> Dict[str, Any]:
     """Delete every chunk of the document from both vector collections.
 
-    Returns ``{"ok": bool, "deleted": <n>, "reason": str?}``.
+    Each collection's deletion is **verified**: the count of remaining
+    chunks is checked after the delete, so a silent no-op (wrong store,
+    path mishap, metadata mismatch...) is reported as a failure instead
+    of an honest-looking "0 deleted".
+
+    Returns ``{"ok": bool, "deleted": <n>, "remaining": <n>, "reason": str?}``.
     """
     deleted = 0
+    remaining_total = 0
     for key in ("source_chunks", "knowledge_chunks"):
         try:
             from src.indexing.chroma_client import ChromaVectorClient
 
             client = ChromaVectorClient(key)
             deleted += client.delete_document(doc_id)
+            remaining = client.count_document(doc_id)
+            remaining_total += remaining
+            if remaining:
+                return {
+                    "ok": False,
+                    "deleted": deleted,
+                    "remaining": remaining_total,
+                    "reason": (
+                        f"vector collection '{key}': {remaining} chunk(s) "
+                        "still present after deletion"
+                    ),
+                }
         except Exception as exc:  # noqa: BLE001 — reported, not raised
             return {
                 "ok": False,
                 "deleted": deleted,
+                "remaining": remaining_total,
                 "reason": f"vector collection '{key}': {exc}",
             }
-    return {"ok": True, "deleted": deleted}
+    return {"ok": True, "deleted": deleted, "remaining": 0}
 
 
 def _remove_job_entries(file_name: str) -> Dict[str, Any]:

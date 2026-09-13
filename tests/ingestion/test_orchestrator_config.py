@@ -119,13 +119,19 @@ class FlagForwardingTest(unittest.TestCase):
             captured.update(origin=context.metadata.get("document_origin"))
         ) or self._fake_outcome()
 
+        # Vocabulary-agnostic: any configured origin, uppercased, must be
+        # normalized to its configured (lowercase) label and forwarded.
+        from src.tools.config_loader import get_valid_origins
+
+        probe = get_valid_origins()[-1]
+
         with tempfile.TemporaryDirectory() as tmp:
             pdf = Path(tmp) / "doc.pdf"
             pdf.write_bytes(b"%PDF-1.4")
             with mock.patch.object(orch, "IngestionGraph", return_value=graph_mock):
-                orch.run_ingestion_file(pdf, agents={}, origin="RPG")
+                orch.run_ingestion_file(pdf, agents={}, origin=probe.upper())
 
-        self.assertEqual(captured["origin"], "rpg")
+        self.assertEqual(captured["origin"], probe)
 
     def test_no_origin_means_no_metadata_entry(self):
         """The CLI makes -o mandatory: without it, nothing is set — the
