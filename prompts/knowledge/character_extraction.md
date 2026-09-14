@@ -35,15 +35,21 @@ Respond with a single JSON object, no prose, no markdown fences:
   identities yourself.
 - Never invent characters that are not named in the text. Anonymous roles
   ("the jailer") are extracted only if they recur or matter to the plot.
+- A unit with NO characters at all is a NORMAL result: respond with
+  `{"characters": []}`. This is not an error — do not use the failure
+  mode for it.
 - Preserve accents and original spelling ("Dantès", not "Dantes").
 - Do not include the narrator or the reader.
 
 ## Failure mode
 
-If the content is unreadable or you cannot comply, respond with:
+Use the error marker ONLY when the content itself is unusable (empty,
+garbled, in a language you cannot read, or truncated beyond sense) —
+NEVER because the unit simply contains no characters. In that rare case,
+respond with:
 
 ```json
 {"characters": [], "error": "reason"}
 ```
 
-The orchestrator treats an `error` field as a retryable LLM-response failure.
+The orchestrator then skips that unit and continues with the next one.

@@ -25,10 +25,13 @@ file under ``knowledge_output_dir`` (config/ingestion.yaml, default
 ``context.outputs[OUTPUT_KEY]`` for the in-memory consumers (the future
 knowledge-validation step reads the stores, not the context).
 
-Failure handling: the graph's retry policy applies — an LLM call error, an
-unreadable answer or a prompt-defined ``error`` marker fails the step with
-``FailureDomain.LLM_RESPONSE`` (retryable); there is no data-shaped failure
-here, an empty extraction is a legitimate ``characters: []`` result.
+Failure handling: the graph's retry policy applies — an LLM call error or
+a malformed answer fails the step with ``FailureDomain.LLM_RESPONSE``
+(retryable). An empty extraction is a legitimate ``characters: []``
+result — never a failure. A unit the LLM reports unreadable via the
+prompt's ``error`` marker only skips THAT unit (with a warning): retrying
+the whole step could not fix it and would re-call the LLM for every
+already-analyzed unit.
 
 Traces (``task`` phase, visible in the thinking panel):
 ``knowledge_start`` (granularity + unit count), ``knowledge_unit`` per
@@ -60,6 +63,15 @@ from src.knowledge.character_cache import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class UnitUnreadableError(ValueError):
+    """The LLM reported the unit unreadable via the prompt's ``error`` marker.
+
+    Deliberately NOT a step failure: one unit without extractable content
+    (e.g. a purely technical section) is normal. The unit is skipped with a
+    warning and the walk continues — a step-level retry could not change the
+    outcome and would re-call the LLM for every unit already analyzed."""
 
 #: Context key this agent reads (the extraction produced by content_extraction).
 INPUT_KEY = "content_extraction"
@@ -208,8 +220,10 @@ class EntityExtractionAgent(LLMRoleAgent):
         """Parse the LLM answer into this entity type's entries.
 
         Returns the list of entries; raises ``ValueError`` when the answer
-        is unusable (not JSON, wrong shape, or carries the prompt-defined
-        ``error`` marker). Subclasses may narrow the entry validation.
+        is unusable (not JSON, wrong shape) and
+        :class:`UnitUnreadableError` when the answer carries the
+        prompt-defined ``error`` marker (unit skipped, not a failure).
+        Subclasses may narrow the entry validation.
         """
         from src.routing.models import _extract_json_payload
 
@@ -218,7 +232,7 @@ class EntityExtractionAgent(LLMRoleAgent):
             raise ValueError(f"expected a JSON object, got {type(payload).__name__}")
         error = payload.get(ERROR_MARKER_KEY)
         if error:
-            raise ValueError(f"unit reported unreadable by the LLM: {error}")
+            raise UnitUnreadableError(f"unit reported unreadable by the LLM: {error}")
         entries = payload.get(self.OUTPUT_ENTRY_KEY)
         if not isinstance(entries, list):
             raise ValueError(
@@ -288,6 +302,15 @@ class EntityExtractionAgent(LLMRoleAgent):
             llm_calls += 1
             try:
                 found = self._parse_answer(raw, label)
+            except UnitUnreadableError as exc:
+                # One unit the LLM could not read is normal (e.g. a purely
+                # technical section): warn, skip the unit, keep walking.
+                # A step-level retry could not fix this unit and would
+                # re-call the LLM for every unit already analyzed.
+                logger.warning("Unit skipped (unreadable) %s: %s", label, exc)
+                context.emit("task", "knowledge_unit_skipped",
+                             f"{label}: skipped — {exc}", label=label)
+                continue
             except ValueError as exc:
                 logger.warning("Unusable knowledge answer for %s: %s", label, exc)
                 context.emit("task", "knowledge_failed",

@@ -246,13 +246,38 @@ class ParsingAndFailureTest(unittest.TestCase):
         )
         self.assertEqual(entries[0]["full_name"], "Faria")
 
-    def test_error_marker_is_a_failure(self):
-        raw = json.dumps({"characters": [], "error": "content unreadable"})
+    def test_error_marker_skips_the_unit_and_continues(self):
+        # The Gazette case: a section with no characters must NOT fail the
+        # step (a retry could not fix it and would re-call every unit).
+        # The unit is skipped with a warning; the walk continues.
+        raw = json.dumps({"characters": [], "error": "no characters mentioned"})
         agent = StubKnowledgeAgent(raw)
+        result, context = run_agent(agent, make_document())
+        self.assertEqual(result.status.value, "ok")
+        self.assertEqual(agent.calls, 4)  # every unit was still attempted
+        self.assertEqual(result.payload["characters"], [])
+        skipped = [e for e in context.events if e["kind"] == "knowledge_unit_skipped"]
+        self.assertEqual(len(skipped), 4)
+        self.assertIn("no characters mentioned", skipped[0]["message"])
+
+    def test_error_marker_unit_then_valid_units_still_collects(self):
+        # First unit reports unreadable, the others yield entries: the
+        # entries from the healthy units are kept.
+        replies = [
+            json.dumps({"characters": [], "error": "garbled"}),
+            json.dumps({"characters": [{"full_name": "Faria"}]}),
+            json.dumps({"characters": []}),
+            json.dumps({"characters": []}),
+        ]
+        agent = StubKnowledgeAgent(replies)
         result, _ = run_agent(agent, make_document())
-        self.assertEqual(result.status.value, "failed")
-        self.assertEqual(result.failure_domain.value, "llm_response")
-        self.assertIn("content unreadable", result.detail)
+        self.assertEqual(result.status.value, "ok")
+        self.assertEqual(result.payload["characters"][0]["full_name"], "Faria")
+
+    def test_empty_answer_is_never_a_failure(self):
+        agent = StubKnowledgeAgent(json.dumps({"characters": []}))
+        result, _ = run_agent(agent, make_document())
+        self.assertEqual(result.status.value, "ok")
 
     def test_non_json_answer_fails_with_llm_response_domain(self):
         agent = StubKnowledgeAgent("I cannot comply, here is a haiku instead")

@@ -6,5 +6,5 @@ venv\Scripts\activate
 REM
 REM === Lancement de Wintermute
 REM
-fastapi run --reload
+START "Fast API" /b /wait fastapi run --reload
 REM
