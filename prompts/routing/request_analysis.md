@@ -14,10 +14,13 @@ general ones; you keep the user's order WITHIN each scope.
 
 ## Output format
 
-Respond with a single JSON object, no prose, no markdown fences:
+Respond with a single JSON object, no prose, no markdown fences. The
+object carries ONE top-level `language` key — the language the user wrote
+in — plus the two request lists:
 
 ```json
 {
+  "language": "fr",
   "retrieval": [
     {
       "lookup_kind": "semantic|index|relation|summary|listing",
@@ -38,8 +41,17 @@ Respond with a single JSON object, no prose, no markdown fences:
 }
 ```
 
+`language` is the ISO two-letter code of the prompt's language (`"fr"`,
+`"en"`, `"de"`...). It is authoritative: every reply the system produces
+for this prompt will be written in that language. Detect it from the
+user's own words — not from the words you quote, not from any document.
+When the prompt mixes languages, use the language of the requests
+themselves (not the politeness wrapper). Never omit the key — use `"en"
+when truly ambiguous.
+
 Every scope list may be empty; a prompt with no request at all yields two
-empty lists (never `null`, never a missing key — use `[]`).
+empty lists (never `null`, never a missing key — use `[]`). The
+`language` key is always present.
 
 ## There is NO ingestion scope — important
 
@@ -110,29 +122,29 @@ word the user wrote.
 ## Examples
 
 Input: `"Please ingest the new 'meow.pdf'"`
-→ `{"retrieval": [], "general": [{"question": "Please ingest the new 'meow.pdf'", "utterance": "Please ingest the new 'meow.pdf'"}]}`
+→ `{"language": "en", "retrieval": [], "general": [{"question": "Please ingest the new 'meow.pdf'", "utterance": "Please ingest the new 'meow.pdf'"}]}`
 (an ingestion request in conversation → general; the agent explains the CLI workflow)
 
 Input: `"Ingest Dumas.pdf, then who marries Edmond?"`
-→ `{"retrieval": [{"lookup_kind": "relation", "question": "Who marries Edmond", "document": null, "chapter_title": null, "top_k": null, "reason": "kinship relation between named entities", "utterance": "then who marries Edmond?"}], "general": [{"question": "Ingest Dumas.pdf", "utterance": "Ingest Dumas.pdf"}]}`
+→ `{"language": "en", "retrieval": [{"lookup_kind": "relation", "question": "Who marries Edmond", "document": null, "chapter_title": null, "top_k": null, "reason": "kinship relation between named entities", "utterance": "then who marries Edmond?"}], "general": [{"question": "Ingest Dumas.pdf", "utterance": "Ingest Dumas.pdf"}]}`
 (the ingestion ask cannot be honored from the chat; the question is routed)
 
 Input: `"Who is the King of the North? Tell me more about him, especially his family tree."`
-→ `{"retrieval": [{"lookup_kind": "semantic", "question": "Who is the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "identity question", "utterance": "Who is the King of the North?"}, {"lookup_kind": "semantic", "question": "everything about the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "open content question on the same entity", "utterance": "Tell me more about him"}, {"lookup_kind": "relation", "question": "family tree of the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "kinship relations of a named entity", "utterance": "especially his family tree"}], "general": []}`
+→ `{"language": "en", "retrieval": [{"lookup_kind": "semantic", "question": "Who is the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "identity question", "utterance": "Who is the King of the North?"}, {"lookup_kind": "semantic", "question": "everything about the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "open content question on the same entity", "utterance": "Tell me more about him"}, {"lookup_kind": "relation", "question": "family tree of the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "kinship relations of a named entity", "utterance": "especially his family tree"}], "general": []}`
 
 Input: `"I would like you to ingest some documents, then provide me with the summary of it. Is it possible?"`
-→ `{"retrieval": [], "general": [{"question": "I would like you to ingest some documents, then provide me with the summary of it. Is it possible?", "utterance": "I would like you to ingest some documents, then provide me with the summary of it. Is it possible?"}]}`
+→ `{"language": "en", "retrieval": [], "general": [{"question": "I would like you to ingest some documents, then provide me with the summary of it. Is it possible?", "utterance": "I would like you to ingest some documents, then provide me with the summary of it. Is it possible?"}]}`
 
 Input: `"Hello, who are you?"`
-→ `{"retrieval": [], "general": [{"question": "Hello, who are you?", "utterance": "Hello, who are you?"}]}`
+→ `{"language": "en", "retrieval": [], "general": [{"question": "Hello, who are you?", "utterance": "Hello, who are you?"}]}`
 
 Input: `""`
-→ `{"retrieval": [], "general": []}`
+→ `{"language": "en", "retrieval": [], "general": []}`
 
 Input: `"OK, bien. Dis-moi ce que tu sais d'une épée de vif-argent ?"`
-→ `{"retrieval": [{"lookup_kind": "semantic", "question": "que sait-on sur l'épée de vif-argent", "document": null, "chapter_title": null, "top_k": null, "reason": "question de contenu sur un objet du monde", "utterance": "Dis-moi ce que tu sais d'une épée de vif-argent ?"}], "general": []}`
+→ `{"language": "fr", "retrieval": [{"lookup_kind": "semantic", "question": "que sait-on sur l'épée de vif-argent", "document": null, "chapter_title": null, "top_k": null, "reason": "question de contenu sur un objet du monde", "utterance": "Dis-moi ce que tu sais d'une épée de vif-argent ?"}], "general": []}`
 (the question mentions an item of the world, not a file)
 
 Input: `"Charge gazette.pdf s'il te plaît, c'est un doc officiel."`
-→ `{"retrieval": [], "general": [{"question": "Charge gazette.pdf s'il te plaît, c'est un doc officiel.", "utterance": "Charge gazette.pdf s'il te plaît, c'est un doc officiel."}]}`
+→ `{"language": "fr", "retrieval": [], "general": [{"question": "Charge gazette.pdf s'il te plaît, c'est un doc officiel.", "utterance": "Charge gazette.pdf s'il te plaît, c'est un doc officiel."}]}`
 (an ingestion order in conversation → general, even with a file name and an origin)

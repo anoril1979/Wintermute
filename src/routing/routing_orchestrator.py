@@ -46,6 +46,7 @@ from src.agents.contexts import EventCallback, RoutingContext
 from src.agents.routing_registry import build_default_task_agents
 from src.graphs import RoutingGraph, RoutingOutcome
 from src.logging_setup import configure_logging
+from src.routing.language import DEFAULT_LANGUAGE
 from src.routing.models import (
     GeneralRequest,
     RetrievalRequest,
@@ -114,6 +115,11 @@ def run_routing(
         "retrieval": len(analysis.retrieval),
         "general": len(analysis.general),
     }
+    # Reply language: detected once by the analyzer, carried unchanged to
+    # the last LLM of the flow (AnswerAgent / GeneralTaskAgent) — the
+    # structural fix for prompts answered in the wrong language. Agents
+    # read it from context.metadata["language"] (default: English).
+    context.metadata["language"] = analysis.language
     summary_bits = [
         f"{len(analysis.retrieval)} retrieval, "
         f"{len(analysis.general)} general"
@@ -127,6 +133,7 @@ def run_routing(
             else "no actionable request found in the prompt"
         ),
         groups=context.metadata["groups"],
+        language=analysis.language,
         requests=[_request_summary(r) for r in requests],
     )
 
@@ -153,6 +160,7 @@ def run_routing(
         "status": status,
         "request": request,
         "request_count": len(requests),
+        "language": context.metadata.get("language", DEFAULT_LANGUAGE),
         "results": outcome.as_list(),
         "traces": list(context.events),
     }

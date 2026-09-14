@@ -144,9 +144,10 @@ class RequestAnalyzer:
 
         logger.info(
             "Analyzed prompt into %d request(s) "
-            "(retrieval=%d, general=%d).",
+            "(retrieval=%d, general=%d), reply language '%s'.",
             result.request_count,
             len(result.retrieval),
             len(result.general),
+            result.language,
         )
         return result

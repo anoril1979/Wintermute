@@ -49,6 +49,7 @@ from typing import List, Optional
 from src.agents.contexts import RoutingContext
 from src.agents.llm_roles import LLMRoleAgent, MissingLLMRoleError
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
+from src.routing.language import normalize_language
 from src.routing.models import GeneralRequest, RequestContextEntry
 
 logger = logging.getLogger(__name__)
@@ -124,9 +125,13 @@ class GeneralTaskAgent(LLMRoleAgent):
                      f"answering general request: {utterance[:80]}",
                      request="general question")
         local = self._local_context_block(getattr(request, "preceding", None) or [])
+        # Reply language: detected by the routing analyzer (context
+        # metadata), injected as an authoritative prompt KEY — the reply
+        # is written in it even when the request quotes other languages.
+        language = normalize_language(context.metadata.get("language"))
         try:
             answer = self.llm_client().complete(
-                prompt=self._build_prompt(utterance, local)
+                prompt=self._build_prompt(utterance, local, language)
             )
         except Exception as exc:  # LLMClientError / ValueError / transport
             logger.warning("General agent LLM call failed: %s", exc)
@@ -214,8 +219,10 @@ class GeneralTaskAgent(LLMRoleAgent):
         ]
         return "\n".join(lines)
 
-    def _build_prompt(self, utterance: str, local_context: str = "") -> str:
-        """Full prompt: persona rules + optional same-prompt context + utterance."""
+    def _build_prompt(self, utterance: str, local_context: str = "",
+                      language: str = "en") -> str:
+        """Full prompt: persona rules + reply language + optional
+        same-prompt context + utterance."""
         if local_context:
             context_block = (
                 "\n---\n\n"
@@ -229,6 +236,9 @@ class GeneralTaskAgent(LLMRoleAgent):
         return (
             f"{self._prompt_template_text().strip()}\n"
             f"{context_block}"
+            "\n---\n\n"
+            "Reply language:\n"
+            f"{language}\n"
             "\n---\n\n"
             "User request:\n"
             "<<<<PROMPT>>>>\n"

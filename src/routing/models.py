@@ -60,6 +60,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from src.routing.language import DEFAULT_LANGUAGE
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,16 +180,34 @@ class GeneralRequest(_StrictModel):
 
 
 class AnalysisResult(_StrictModel):
-    """The whole analyzer answer: requests grouped by scope.
+    """The whole analyzer answer: requests grouped by scope + the reply language.
 
     Ingestion is deliberately absent (see module docstring): a prompt that
     asks for ingestion in conversation yields a ``general`` request — the
     general agent explains the CLI workflow. :meth:`flattened` produces
     the dispatch order.
+
+    ``language`` is the reply-language key the analyzer extracts from the
+    prompt (prompts/routing/request_analysis.md): detected ONCE here,
+    carried unchanged to the last LLM of the flow (AnswerAgent /
+    GeneralTaskAgent) as an authoritative "Reply language" prompt key —
+    the structural fix for prompts answered in the wrong language.
+    Normalized fail-open to ``en`` by :func:`src.routing.language.normalize_language`
+    (a detection problem must never break routing).
     """
 
     retrieval: List[RetrievalRequest] = Field(default_factory=list)
     general: List[GeneralRequest] = Field(default_factory=list)
+    language: str = Field(default=DEFAULT_LANGUAGE)
+
+    @field_validator("language")
+    @classmethod
+    def _normalize_language(cls, value: str) -> str:
+        """Fail-open normalization: recognized label -> canonical code,
+        anything else -> the English default (never a validation error)."""
+        from src.routing.language import normalize_language
+
+        return normalize_language(value)
 
     @model_validator(mode="after")
     def _cap_requests(self) -> "AnalysisResult":

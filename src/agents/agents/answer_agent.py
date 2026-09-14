@@ -36,6 +36,7 @@ from typing import List, Optional
 from src.agents.contexts import RetrievalContext
 from src.agents.llm_roles import LLMRoleAgent, MissingLLMRoleError
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
+from src.routing.language import nothing_found_reply, normalize_language
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +48,6 @@ ANSWER_PROMPT_PATH = Path("prompts/answering/retrieval_answer.md")
 #: Cap on excerpt characters fed to the model: the answerer must read
 #: the sources, not drown in them (top_k is already clamped upstream).
 MAX_EXCERPT_CHARS = 1500
-
-#: Marker for the "the sources hold nothing on this" reply. The prompt
-#: instructs the model to say it in the user's language; this constant
-#: is only the deterministic fallback when no hits exist at all.
-NOTHING_FOUND_EN = (
-    "The sources I hold say nothing about that. Ingest a document "
-    "covering it, or ask me something else my memory contains."
-)
 
 
 class AnswerAgent(LLMRoleAgent):
@@ -106,16 +99,19 @@ class AnswerAgent(LLMRoleAgent):
         if not hits:
             # Deterministic path: nothing to ground on, no LLM call — the
             # prompt's rule "no corpus, no answer" enforced in Python.
+            # The fallback reply honors the detected reply language like
+            # every LLM-phrased answer would.
+            reply = nothing_found_reply(context.metadata.get("language"))
             context.emit(
                 "task", "answer_no_source",
                 "no hit to phrase an answer from — the corpus holds nothing relevant",
             )
-            context.outputs["answer"] = NOTHING_FOUND_EN
+            context.outputs["answer"] = reply
             return AgentResult(
                 agent_name=self.name,
                 status=AgentStatus.OK,
                 detail="no relevant chunk found in the corpus",
-                payload={"answer": NOTHING_FOUND_EN, "no_answer": True},
+                payload={"answer": reply, "no_answer": True},
             )
 
         if self._role_missing:
@@ -133,6 +129,11 @@ class AnswerAgent(LLMRoleAgent):
             )
 
         question = (context.question or "").strip()
+        # Reply language: detected by the routing analyzer, forwarded by
+        # the retrieval orchestrator. An authoritative prompt KEY — not a
+        # hint buried in prose: the reply agent must answer in it even
+        # when the sources read in another language.
+        language = normalize_language(context.metadata.get("language"))
         sources_block = self._render_sources(hits)
 
         # Debug trail (log file): what the agent RECEIVED, chunk by chunk,
@@ -158,6 +159,9 @@ class AnswerAgent(LLMRoleAgent):
 
         prompt = (
             f"{self._prompt_template_text().strip()}\n"
+            "\n---\n\n"
+            "Reply language:\n"
+            f"{language}\n"
             "\n---\n\n"
             "Sources retrieved from the ingested corpus:\n\n"
             f"{sources_block}\n"

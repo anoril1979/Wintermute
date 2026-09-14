@@ -78,7 +78,11 @@ class RetrievalTaskAgent:
             f"answering from the corpus: {request.question!r}",
             lookup_kind=request.lookup_kind.value,
         )
-        result = self._run_retrieval([request], on_event=context.on_event)
+        result = self._run_retrieval(
+            [request],
+            on_event=context.on_event,
+            language=str(context.metadata.get("language") or ""),
+        )
 
         # Merge the pipeline's internal traces into the routing context's
         # event log: with a live observer they already streamed through;
@@ -203,12 +207,16 @@ class RetrievalTaskAgent:
         requests: list,
         *,
         on_event: Optional[object] = None,
+        language: str = "",
     ) -> Dict[str, Any]:
         """Call the retrieval orchestrator (lazily imported / injectable).
 
         ``on_event`` is forwarded so the pipeline's internal events
         (decision table, graph steps) reach the routing context's observer
         — the thinking panel then shows the whole retrieval flow live.
+        ``language`` is the reply language detected by the routing
+        analyzer (context metadata): the retrieval orchestrator carries it
+        to the RetrievalContext so the answer agent phrases in it.
         """
         if self._runner is None:
             from src.retrieval.retrieval_orchestrator import run_retrieval
@@ -217,4 +225,6 @@ class RetrievalTaskAgent:
         kwargs: Dict[str, Any] = {}
         if on_event is not None:
             kwargs["on_event"] = on_event
+        if language:
+            kwargs["language"] = language
         return dict(self._runner(requests, **kwargs))

@@ -59,6 +59,7 @@ def run_retrieval(
     *,
     graph: Optional[RetrievalGraph] = None,
     on_event: Optional[Any] = None,
+    language: str = "",
 ) -> Dict[str, Any]:
     """Full retrieval flow for the lookup requests of one user prompt.
 
@@ -68,6 +69,9 @@ def run_retrieval(
         graph: optional pre-built graph (tests); a default one is built
             otherwise.
         on_event: optional live observer of the trace events.
+        language: the reply language detected by the routing analyzer
+            (ISO code or free label, normalized fail-open) — carried to
+            the RetrievalContext so the answer agent phrases in it.
 
     Returns:
         A dict with a top-level ``status`` and per-request sub-results in
@@ -128,6 +132,7 @@ def run_retrieval(
         decision = apply_decision_table(facts, spec)
         sub = _solve_request(
             graph, decision, request_index=index, on_event=_record,
+            language=language,
         )
         sub_results.append(sub)
         flat_hits.extend(sub.get("hits", []))
@@ -166,12 +171,15 @@ def _solve_request(
     *,
     request_index: int,
     on_event: Any,
+    language: str = "",
 ) -> Dict[str, Any]:
     """Solve ONE classified request through the graph.
 
     Same statuses as the batch contract (``ok``, ``no_corpus``,
     ``not_implemented``, ``failed``), scoped to the request; the caller
-    aggregates them into the top-level status.
+    aggregates them into the top-level status. ``language`` is the reply
+    language (routing analyzer detection) placed in the graph context's
+    metadata for the answer agent.
     """
     spec = decision.spec
     prefix = "[request %d] " % request_index
@@ -225,6 +233,9 @@ def _solve_request(
             "filters": decision.filters,
             "top_k": decision.top_k,
             "intent": spec.summary(),
+            # Reply language (detected by the routing analyzer, forwarded
+            # by the task agent): the answer agent phrases in it.
+            "language": language,
         }
     )
 
