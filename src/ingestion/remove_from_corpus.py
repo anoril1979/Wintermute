@@ -186,8 +186,8 @@ def _purge_knowledge_base(doc_id: str) -> Dict[str, Any]:
             characters_dir,
             index_path_for,
             read_character,
+            rebuild_index,
             write_character,
-            write_index,
         )
 
         folder = characters_dir()
@@ -195,11 +195,10 @@ def _purge_knowledge_base(doc_id: str) -> Dict[str, Any]:
             # No knowledge base yet: nothing to purge, not an error.
             return {"ok": True, "purged_files": 0, "deleted_files": 0}
 
-        index_name = index_path_for(folder).name
+        index_name = index_path_for().name
         prefix = f"{doc_id}::"
         purged_files = 0
         deleted_files = 0
-        survivors: list = []
 
         for path in sorted(folder.glob("*.md")):
             if path.name == index_name:
@@ -230,12 +229,10 @@ def _purge_knowledge_base(doc_id: str) -> Dict[str, Any]:
                 kept_names.append(name)
 
             if not changed:
-                survivors.append((full_name, data["names"]))  # type: ignore[arg-type]
                 continue
             if kept_names:
                 write_character(full_name, kept_names, path)
                 purged_files += 1
-                survivors.append((full_name, kept_names))
             else:
                 path.unlink()
                 deleted_files += 1
@@ -244,12 +241,14 @@ def _purge_knowledge_base(doc_id: str) -> Dict[str, Any]:
                     "removed: %s", path.name,
                 )
 
-        write_index(index_path_for(folder), [
-            {"full_name": full_name,
-             "aliases": [str(n["alias"]) for n in names  # type: ignore[union-attr]
-                         if str(n["alias"]).strip() != full_name]}
-            for full_name, names in survivors
-        ])
+        # The listing is rebuilt from the FILES — single-writer rule: the
+        # index is the projection of the per-character files, so a removed
+        # character's line disappears here by construction (never edited
+        # line-by-line in parallel). REBUILT AT THE BASE ROOT: index_path_for
+        # expects the knowledge BASE dir — passing the characters folder
+        # nested the write one level too deep and left the real listing
+        # stale (the bug this line replaces).
+        rebuild_index()
         return {"ok": True, "purged_files": purged_files,
                 "deleted_files": deleted_files}
     except Exception as exc:  # noqa: BLE001 — reported, not raised

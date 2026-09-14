@@ -67,15 +67,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.agents.contexts import IngestionContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.knowledge.character_markdown_store import (
-    INDEX_FILENAME,
     CharacterMarkdownError,
     character_path_for,
-    characters_dir,
     index_path_for,
     load_index,
     read_character,
+    rebuild_index,
     write_character,
-    write_index,
 )
 
 logger = logging.getLogger(__name__)
@@ -298,25 +296,12 @@ class EntityResolverAgent:
         return load_index(index_path_for(base_dir))
 
     def _sync_index(self, base_dir: Path) -> Path:
-        """End-of-pass index rebuild: the base's character FILES are the
-        truth, the index their projection — a full rewrite drops stale
-        lines (hand-deleted files) and picks up hand-created ones, while
-        the in-memory snapshot's create-merges are already on disk."""
-        index_path = index_path_for(base_dir)
-        characters: List[Dict[str, object]] = []
-        for path in sorted(characters_dir(base_dir).glob("*.md")):
-            if path.name == INDEX_FILENAME:
-                continue
-            data = read_character(path)  # may raise CharacterMarkdownError
-            full_name = str(data["full_name"])
-            aliases = [
-                str(n.get("alias", "")).strip()
-                for n in data["names"]  # type: ignore[union-attr]
-                if str(n.get("alias", "")).strip() != full_name
-            ]
-            characters.append({"full_name": full_name, "aliases": aliases})
-        write_index(index_path, characters)
-        return index_path
+        """End-of-pass index rebuild — delegated to the store's single-writer
+        primitive: the base's character FILES are the truth, the index their
+        projection (stale lines for deleted files disappear; hand-created
+        files are picked up; the in-run snapshot's create-merges are already
+        on disk when this runs)."""
+        return rebuild_index(base_dir)
 
     def _base_dir(self, context: IngestionContext) -> Path:
         """Knowledge-base folder (constructor override > config)."""

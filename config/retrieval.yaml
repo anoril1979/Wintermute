@@ -20,7 +20,7 @@ max_top_k: 20
 # Cosine distance for these embedding models: <0.35 similarity is noise.
 # NOTE: the dimension/metric of a collection is frozen by its first write
 # (setup.yaml note) — retuning this only affects the filter, not the data.
-min_score: 0.45
+min_score: 0.35
 
 # The llm.yaml role that provides the QUERY embeddings. It MUST be the
 # same model that embedded the corpus (the "embedding" role) — embedding

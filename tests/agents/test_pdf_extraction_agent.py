@@ -87,6 +87,11 @@ class _StubKnowledgeExtractor:
     def run(self, context):
         from src.agents.protocols import AgentResult
 
+        # The real agent writes the context output the downstream
+        # knowledge steps consume.
+        context.outputs["knowledge_characters"] = {
+            "characters": [], "llm_calls": 0,
+        }
         return AgentResult(agent_name=self.name, status=AgentStatus.OK,
                            payload={"characters": [], "llm_calls": 0})
 
@@ -238,6 +243,10 @@ class OrchestratorPlugTest(unittest.TestCase):
         # The knowledge extractor makes real LLM calls and writes the real
         # data/cache/knowledge folder: stub it like the indexer.
         registry["knowledge_extractor"] = _StubKnowledgeExtractor()
+        # The resolver would write the real data/knowledge base: remove it
+        # so the graph stops at check_and_merge (this test pins the graph
+        # wiring, not the resolver internals — see test_entity_resolver_agent).
+        registry.pop("entity_resolver", None)
         registry.update(overrides)
         return registry
 
@@ -249,7 +258,7 @@ class OrchestratorPlugTest(unittest.TestCase):
         graph runs content_extraction, extraction_validation,
         hierarchical_summarization, source_indexing AND knowledge_extraction
         (all implemented), then stops at the not-yet-implemented
-        knowledge_validation step."""
+        check_and_merge step."""
         from src.ingestion.ingestion_orchestrator import run_ingestion_file
 
         stub = StubExtractor(document=make_document(self.pdf_path))
@@ -270,10 +279,10 @@ class OrchestratorPlugTest(unittest.TestCase):
             result["completed_steps"],
             ["content_extraction", "extraction_validation",
              "hierarchical_summarization", "source_indexing",
-             "knowledge_extraction"],
+             "knowledge_extraction", "knowledge_validation"],
         )
-        self.assertEqual(result["not_implemented_steps"], ["knowledge_validation"])
-        self.assertEqual(result["failed_step"], "knowledge_validation")
+        self.assertEqual(result["not_implemented_steps"], ["check_and_merge"])
+        self.assertEqual(result["failed_step"], "check_and_merge")
 
     def test_content_free_extraction_is_rejected_by_validation(self):
         """An extraction with no content at all passes the structural gate

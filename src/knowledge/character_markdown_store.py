@@ -270,6 +270,42 @@ def write_index(path: Path, characters: List[Dict[str, object]]) -> Path:
     return Path(path)
 
 
+def rebuild_index(base_dir: Optional[Path] = None) -> Path:
+    """Rebuild the WHOLE sidecar index from the character files of the base.
+
+    Single writer of ``characters.md``: every flow that touches the base
+    (the resolver's end-of-pass sync, the removal engine's purge) ends by
+    calling this — the files are the truth, the index their projection, so
+    a flow cannot leave the listing inconsistent by forgetting a step.
+
+    Skips the index file itself; a character file that fails to parse is
+    reported (CharacterMarkdownError) instead of silently dropped from the
+    listing. Character files with empty ``Known names:`` (should not exist:
+    a purged character loses its file) are skipped defensively.
+    """
+    folder = characters_dir(base_dir)
+    index_path = index_path_for(base_dir)
+    characters: List[Dict[str, object]] = []
+    if folder.is_dir():
+        for path in sorted(folder.glob("*.md")):
+            if path.name == INDEX_FILENAME:
+                continue
+            data = read_character(path)  # may raise CharacterMarkdownError
+            full_name = str(data["full_name"])
+            names = data["names"]  # type: ignore[union-attr]
+            if not names:
+                continue
+            characters.append({
+                "full_name": full_name,
+                "aliases": [
+                    str(n.get("alias", "")).strip()
+                    for n in names  # type: ignore[union-attr]
+                    if str(n.get("alias", "")).strip() != full_name
+                ],
+            })
+    return write_index(index_path, characters)
+
+
 def upsert_index(path: Path, full_name: str, aliases: List[str]) -> Path:
     """Insert or replace the character's index line (atomic rewrite).
 

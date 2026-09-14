@@ -30,6 +30,7 @@ from src.knowledge.character_markdown_store import (
     load_index,
     read_character,
     write_character,
+    write_index,
 )
 
 DOC1 = "doc:aaaaaaaa"   # the document being removed
@@ -116,6 +117,44 @@ class PurgeTest(unittest.TestCase):
         write_character("Ghost", [{"alias": "Ghost", "source_ids": [ID1]}], path)
         _purge_knowledge_base(DOC1)
         self.assertEqual(load_index(index_path_for(self.base)), [])
+
+    def test_full_deletion_rebuilds_the_listing_at_the_base_root(self):
+        # Regression: the purge used to rebuild the index at
+        # <characters>/characters/characters.md (index_path_for fed the
+        # characters FOLDER instead of the base dir), leaving the real
+        # listing stale with entries of deleted characters.
+        gone = character_path_for("Ghost", self.base)
+        write_character("Ghost", [{"alias": "Ghost", "source_ids": [ID1]}], gone)
+        survivor = character_path_for("Joe", self.base)
+        write_character("Joe", [{"alias": "Joe", "source_ids": [ID2]}], survivor)
+
+        report = _purge_knowledge_base(DOC1)
+        self.assertTrue(report["ok"])
+
+        # No bogus nested folder may appear next to the real listing.
+        nested = self.chars / "characters"
+        self.assertFalse(nested.exists(), "index rebuilt at the wrong depth")
+        # The real listing shows exactly the surviving files.
+        index = load_index(index_path_for(self.base))
+        self.assertEqual([c["full_name"] for c in index], ["Joe"])
+
+    def test_stale_index_lines_are_swept_by_the_rebuild(self):
+        # The user's live failure mode: listing kept entries whose files
+        # are gone (whatever the reason — the rebuild sweeps them).
+        index_path = index_path_for(self.base)
+        survivor = character_path_for("Joe", self.base)
+        write_character("Joe", [{"alias": "Joe", "source_ids": [ID2]}], survivor)
+        write_index(index_path, [
+            {"full_name": "Harmandy", "aliases": []},       # file missing
+            {"full_name": "Rorg Yanhalas", "aliases": []},  # file missing
+            {"full_name": "Joe", "aliases": []},
+        ])
+
+        report = _purge_knowledge_base(DOC1)   # purges nothing of DOC1
+        self.assertTrue(report["ok"])
+
+        index = load_index(index_path)
+        self.assertEqual([c["full_name"] for c in index], ["Joe"])
 
     def test_malformed_file_fails_the_step(self):
         (self.chars / "broken.md").write_text("garbage, no title\n", encoding="utf-8")

@@ -14,6 +14,7 @@ from src.agents.agents.answer_agent import AnswerAgent
 from src.agents.agents.character_extraction_agent import CharacterExtractionAgent
 from src.agents.agents.entity_resolver_agent import CharacterResolver
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
+from src.agents.agents.knowledge_validation_agent import KnowledgeValidatorAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
 from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
 from src.agents.agents.source_indexing_agent import SourceIndexingAgent
@@ -34,6 +35,8 @@ def build_default_agents() -> Dict[str, IngestionAgent]:
         "source_indexer": SourceIndexingAgent(),
         # First knowledge pass: LLM extraction of the characters.
         "knowledge_extractor": CharacterExtractionAgent(),
+        # Semantic gate on the discovered entities (deterministic).
+        "knowledge_validator": KnowledgeValidatorAgent(),
         # check_and_merge: reconcile discovered characters into the
         # markdown knowledge base (create-or-merge, no LLM).
         "entity_resolver": CharacterResolver(),
