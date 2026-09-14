@@ -83,7 +83,9 @@ class IngestionGraph:
         GraphStep(name="source_indexing", agent_key="source_indexer"),
         GraphStep(name="knowledge_extraction", agent_key="knowledge_extractor"),
         GraphStep(name="knowledge_validation", agent_key="knowledge_validator"),
-        GraphStep(name="check_and_merge", agent_key="check_and_merge"),
+        # check-n-merge: the EntityResolver reconciles the discovered
+        # entities into the markdown knowledge base (create-or-merge).
+        GraphStep(name="check_and_merge", agent_key="entity_resolver"),
         GraphStep(name="indexation", agent_key="indexer"),
     ]
 

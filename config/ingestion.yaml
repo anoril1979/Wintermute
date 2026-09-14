@@ -102,6 +102,15 @@ summary_max_chars: 2500
 knowledge_output_dir: "data/cache/knowledge"
 knowledge_unit_granularity: "section"
 
+# 6. Knowledge base — the resolver's per-entity markdown base. The base
+#    hosts one subfolder per entity type (characters/ today; future
+#    siblings: places/, organizations/...). Each subfolder holds the
+#    per-entity files (<slug>.md) + the characters.md sidecar index (one
+#    line per character with its aliases) — the human-readable,
+#    user-editable listing of the known entities; the EntityResolver
+#    creates a file per discovered character and merges re-discoveries.
+knowledge_base_dir: "data/knowledge"
+
 # 5. CLI logging — durable log of the ingestion CLI (scripts/ingest.py,
 #    scripts/remove.py). Every issue, warning and error survives the console
 #    session there. Relative to the project root; absolute paths are also

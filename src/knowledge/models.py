@@ -324,6 +324,37 @@ class Entity(BaseModel):
         return self
 
 
+class ExtractedEntity(Entity):
+    """Base for entities as DISCOVERED by the knowledge extraction layer.
+
+    Adds to :class:`Entity` the provenance every discovered entity carries,
+    whatever its kind (characters today, places/organizations/objects/
+    events tomorrow):
+
+    Attributes:
+        source_ids: The content units the entity was extracted from, as
+            full hierarchical ids (``doc:<8hex>::chp:1::pg:2::sec:1`` —
+            src/extraction/ids.py). Stamped by the extraction AGENT from
+            the unit's position (never read from the LLM answer), unioned
+            on cross-unit dedup; the EntityResolver writes them into the
+            markdown knowledge base so every alias citation points back
+            into the corpus (and later into the vector chunks).
+    """
+
+    source_ids: List[str] = Field(default_factory=list)
+
+    @field_validator("source_ids")
+    @classmethod
+    def _validate_source_ids(cls, value: List[str]) -> List[str]:
+        """Ids must be non-empty ``<kind>:...`` chains, without blanks."""
+        cleaned = []
+        for source_id in value:
+            if not isinstance(source_id, str) or not source_id.strip():
+                raise ValueError("source_ids entries must be non-empty strings")
+            cleaned.append(source_id.strip())
+        return cleaned
+
+
 # -------------------------------------------------------------------
 # Characters
 # -------------------------------------------------------------------
@@ -336,7 +367,7 @@ def _slugify(name: str) -> str:
     return text
 
 
-class Character(Entity):
+class Character(ExtractedEntity):
     """A character appearing across the documentary sources.
 
     Attributes:

@@ -9,6 +9,8 @@ The ingestion pipeline projects one source document onto several stores:
     data/extracted/<stem>.json     the canonical extracted content
     data/summarized/<stem>.json    the LLM summaries
     data/cache/knowledge/<stem>.json  the knowledge cache (characters...)
+    data/knowledge/characters/*.md   the knowledge base (alias-source ids
+                                     purged; empty characters deleted)
     data/extracted/mineru/<stem>/  MinerU's own sandbox (PDFs only)
 
 Removing a document from the corpus means cleaning **every projection**
@@ -162,6 +164,99 @@ def _remove_json_files(source_path: Optional[Path], stem: str) -> Dict[str, Any]
     return {"ok": True, "removed": removed}
 
 
+def _purge_knowledge_base(doc_id: str) -> Dict[str, Any]:
+    """Purge the document's provenance from the markdown knowledge base.
+
+    Every character file is scanned for ``<doc_id>::`` source ids (the
+    unit-level provenance the extraction stamped and the resolver wrote):
+
+    * ids of the removed document are dropped from every name's sources;
+    * a name left with no source at all is pruned — that name was only
+      ever seen in the removed document;
+    * a character left with no name at all loses its file;
+    * the sidecar index is then rebuilt from the files (the files are
+      the truth, the index their projection — same rule as the
+      resolver's end-of-pass sync).
+
+    Returns ``{"ok": bool, "purged_files": n, "deleted_files": n, "reason"?}``.
+    """
+    try:
+        from src.knowledge.character_markdown_store import (
+            CharacterMarkdownError,
+            characters_dir,
+            index_path_for,
+            read_character,
+            write_character,
+            write_index,
+        )
+
+        folder = characters_dir()
+        if not folder.is_dir():
+            # No knowledge base yet: nothing to purge, not an error.
+            return {"ok": True, "purged_files": 0, "deleted_files": 0}
+
+        index_name = index_path_for(folder).name
+        prefix = f"{doc_id}::"
+        purged_files = 0
+        deleted_files = 0
+        survivors: list = []
+
+        for path in sorted(folder.glob("*.md")):
+            if path.name == index_name:
+                continue
+            try:
+                data = read_character(path)
+            except CharacterMarkdownError as exc:
+                # A malformed file is reported, not silently purged.
+                return {"ok": False, "purged_files": purged_files,
+                        "deleted_files": deleted_files,
+                        "reason": f"{path.name}: {exc}"}
+
+            full_name = str(data["full_name"])
+            kept_names: list = []
+            changed = False
+            for name in data["names"]:  # type: ignore[union-attr]
+                sources = name.get("source_ids")
+                if isinstance(sources, list):
+                    kept = [s for s in sources if not str(s).startswith(prefix)]
+                    if kept != sources:
+                        name["source_ids"] = kept
+                        changed = True
+                    if not kept:
+                        # The name was only ever seen in the removed
+                        # document: prune the alias bullet entirely.
+                        changed = True
+                        continue
+                kept_names.append(name)
+
+            if not changed:
+                survivors.append((full_name, data["names"]))  # type: ignore[arg-type]
+                continue
+            if kept_names:
+                write_character(full_name, kept_names, path)
+                purged_files += 1
+                survivors.append((full_name, kept_names))
+            else:
+                path.unlink()
+                deleted_files += 1
+                logger.info(
+                    "Knowledge base: character with no remaining source "
+                    "removed: %s", path.name,
+                )
+
+        write_index(index_path_for(folder), [
+            {"full_name": full_name,
+             "aliases": [str(n["alias"]) for n in names  # type: ignore[union-attr]
+                         if str(n["alias"]).strip() != full_name]}
+            for full_name, names in survivors
+        ])
+        return {"ok": True, "purged_files": purged_files,
+                "deleted_files": deleted_files}
+    except Exception as exc:  # noqa: BLE001 — reported, not raised
+        return {"ok": False, "purged_files": 0, "deleted_files": 0,
+                "reason": f"knowledge base purge: {exc}"}
+
+
 def _remove_mineru_sandbox(source_path: Optional[Path], stem: str) -> Dict[str, Any]:
     """Remove MinerU's own working folder for the document, when present.
 
@@ -210,10 +305,12 @@ def remove_document(
               "document": <name>,
               "doc_id": "doc:<8hex>",
               "steps": {
-                 "vector":     {"ok": bool, "deleted": n, ...},
-                 "job_files":  {"ok": bool, "removed": [...], ...},
-                 "json_files": {"ok": bool, "removed": [...], ...},
-                 "mineru":     {"ok": bool, "removed": str|None, ...},
+                 "vector":         {"ok": bool, "deleted": n, ...},
+                 "job_files":      {"ok": bool, "removed": [...], ...},
+                 "json_files":     {"ok": bool, "removed": [...], ...},
+                 "knowledge_base": {"ok": bool, "purged_files": n,
+                                    "deleted_files": n, ...},
+                 "mineru":         {"ok": bool, "removed": str|None, ...},
               },
               "reason": str,   # only when partial/rejected
               "source_kept": True   # data/sources is the user's scope
@@ -262,6 +359,7 @@ def remove_document(
         "vector": _remove_vector_projection(doc_id),
         "job_files": _remove_job_entries(file_name),
         "json_files": _remove_json_files(resolved, resolved.stem),
+        "knowledge_base": _purge_knowledge_base(doc_id),
         "mineru": _remove_mineru_sandbox(resolved, resolved.stem),
     }
 

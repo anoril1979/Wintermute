@@ -82,11 +82,16 @@ def main(argv: list | None = None) -> int:
     status = report.get("status")
     if status == STATUS_REMOVED:
         deleted = report["steps"]["vector"].get("deleted", 0)
+        knowledge = report["steps"].get("knowledge_base", {})
+        purged = knowledge.get("purged_files", 0)
+        emptied = knowledge.get("deleted_files", 0)
         logger.info(
             "'%s' (%s) removed from the corpus — %d vector chunk(s) deleted, "
-            "0 remaining in both collections, checkpoints and stores cleaned. "
+            "0 remaining in both collections, checkpoints and stores cleaned, "
+            "knowledge base purged (%d character file(s) updated, %d emptied). "
             "The source file is kept.",
             report.get("document"), report.get("doc_id"), deleted,
+            purged, emptied,
         )
         return EXIT_OK
     if status == STATUS_PARTIAL:

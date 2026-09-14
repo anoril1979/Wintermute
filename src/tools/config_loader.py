@@ -537,6 +537,7 @@ def validate_ingestion_config(config: object) -> dict:
     # -- optional extraction settings ---------------------------------------
     for key in ("extraction_output_dir", "extraction_mineru_output_dir",
                 "summarization_output_dir", "knowledge_output_dir",
+                "knowledge_base_dir",
                 "mineru_json_extension", "extraction_job_file",
                 "summarization_job_file"):
         if key not in config:
@@ -554,6 +555,7 @@ def validate_ingestion_config(config: object) -> dict:
             )
         if key in ("extraction_output_dir", "extraction_mineru_output_dir",
                    "summarization_output_dir", "knowledge_output_dir",
+                   "knowledge_base_dir",
                    "extraction_job_file", "summarization_job_file") \
                 and not _is_valid_relative_path(value):
             raise IngestionConfigError(

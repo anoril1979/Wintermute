@@ -55,6 +55,7 @@ from src.extraction.models import (
     PageContent,
     Section,
 )
+from src.extraction.ids import full_id
 from src.knowledge.character_cache import (
     DEFAULT_GRANULARITY,
     KnowledgeJsonError,
@@ -150,10 +151,22 @@ class EntityExtractionAgent(LLMRoleAgent):
             self._prompt_template = self._prompt_path.read_text(encoding="utf-8")
         return self._prompt_template
 
-    def _build_prompt(self, text: str, label: str) -> str:
-        """Full prompt: instructions + the delimited content unit."""
+    def _build_prompt(self, text: str, label: str, unit_id: Optional[str] = None) -> str:
+        """Full prompt: instructions + the delimited content unit.
+
+        ``unit_id`` (when known) is announced to the LLM so its answer can
+        quote it back for cross-checking — provenance itself is stamped by
+        the agent, never read from the answer.
+        """
+        head = self._prompt_template_text().strip()
+        if unit_id:
+            head += (
+                f"\n\nCurrent content-unit id: {unit_id} "
+                "(for reference only — the orchestrator stamps the "
+                "provenance itself)."
+            )
         return (
-            f"{self._prompt_template_text().strip()}\n"
+            f"{head}\n"
             "\n---\n\n"
             "Content to analyze:\n"
             "<<<<TEXT>>>>\n"
@@ -163,26 +176,57 @@ class EntityExtractionAgent(LLMRoleAgent):
 
     # -- Unit walk ---------------------------------------------------------------
 
+    def _iter_units_with_ids(
+        self, document: DocumentExtract
+    ) -> Iterator[tuple[Any, str]]:
+        """Yield ``(unit, unit_full_id)`` pairs in reading order, at the
+        configured granularity.
+
+        ``unit_full_id`` is the unit's full hierarchical id
+        (``doc:<8hex>::chp:1::pg:2::sec:1``) — the provenance stamp put on
+        every entry extracted from that unit (the link the entity resolver
+        and, later, the claims/SQL layer rely on). It is computed HERE,
+        deterministically from the unit's position: the LLM never returns
+        ids and its answer is not trusted for provenance.
+        """
+        from src.extraction.ids import assign_extract_ids
+
+        # Idempotent; guarantees a hand-loaded DocumentExtract is
+        # id-complete too (the pipeline always assigns ids earlier).
+        assign_extract_ids(document)
+        doc_id = document.id or ""
+        g = self.granularity
+        for chapter_index, chapter in enumerate(document.chapters):
+            if g == "chapter":
+                yield chapter, full_id(doc_id, chapter_index=chapter_index)
+                continue
+            for page_index, page in enumerate(chapter.pages):
+                if g == "page":
+                    yield page, full_id(
+                        doc_id, chapter_index=chapter_index, page_index=page_index
+                    )
+                    continue
+                for section_index, section in enumerate(page.sections):
+                    yield section, full_id(
+                        doc_id,
+                        chapter_index=chapter_index,
+                        page_index=page_index,
+                        section_index=section_index,
+                    )
+        for orphan_index, orphan in enumerate(document.orphan_pages):
+            if g == "page":
+                yield orphan, full_id(doc_id, page_index=orphan_index)
+                continue
+            for section_index, section in enumerate(orphan.sections):
+                yield section, full_id(
+                    doc_id, page_index=orphan_index, section_index=section_index
+                )
+
     def _iter_units(self, document: DocumentExtract) -> Iterator[Any]:
         """Yield the content units of the document, in reading order, at the
         configured granularity (sections / pages / chapters)."""
-        g = self.granularity
-        for chapter in document.chapters:
-            if g == "chapter":
-                yield chapter
-                continue
-            for page in chapter.pages:
-                if g == "page":
-                    yield page
-                    continue
-                for section in page.sections:
-                    yield section
-        for orphan in document.orphan_pages:
-            if g == "page":
-                yield orphan
-                continue
-            for section in orphan.sections:
-                yield section
+        for unit, _ in self._iter_units_with_ids(document):
+            yield unit
 
     @staticmethod
     def unit_text(unit: Any) -> str:
@@ -251,6 +295,10 @@ class EntityExtractionAgent(LLMRoleAgent):
         their own fields; the base class only enforces a non-empty shape."""
         return entry
 
+    #: Provenance key stamped on every entry: the list of the unit ids the
+    #: entry was extracted from (one id per unit; unioned on dedup).
+    SOURCE_ID_KEY = "source_ids"
+
     # -- Dedup ----------------------------------------------------------------------
 
     def _entry_identity(self, entry: Dict[str, Any]) -> Optional[tuple]:
@@ -274,7 +322,11 @@ class EntityExtractionAgent(LLMRoleAgent):
                 detail="no extraction output to analyze",
             )
 
-        units = [u for u in self._iter_units(document) if self.unit_text(u)]
+        units = [
+            (unit, unit_id)
+            for unit, unit_id in self._iter_units_with_ids(document)
+            if self.unit_text(unit)
+        ]
         g = self.granularity
         context.emit(
             "task", "knowledge_start",
@@ -288,11 +340,11 @@ class EntityExtractionAgent(LLMRoleAgent):
         merged = 0
         llm_calls = 0
 
-        for unit in units:
+        for unit, unit_id in units:
             label = self.unit_label(unit)
             text = self.unit_text(unit)
             try:
-                raw = self._call_llm(self._build_prompt(text, label))
+                raw = self._call_llm(self._build_prompt(text, label, unit_id=unit_id))
             except Exception as exc:  # LLMClientError / ValueError / transport
                 logger.warning("Knowledge LLM call failed for %s: %s", label, exc)
                 context.emit("task", "knowledge_failed",
@@ -322,6 +374,9 @@ class EntityExtractionAgent(LLMRoleAgent):
                          f"{label}: {len(found)} {self.OUTPUT_ENTRY_KEY} found",
                          label=label, found=len(found))
             for entry in found:
+                # Provenance stamp — computed by the agent, never read from
+                # the LLM answer (which may not be trusted with ids).
+                entry[self.SOURCE_ID_KEY] = [unit_id]
                 identity = self._entry_identity(entry)
                 if identity is not None and identity in seen:
                     merged += 1
@@ -474,8 +529,14 @@ class CharacterExtractionAgent(EntityExtractionAgent):
         return (full_name, short_name)
 
     def _merge_entries(self, kept: Dict[str, Any], duplicate: Dict[str, Any]) -> None:
-        """Union of aliases (order-preserving); first full/short names win."""
+        """Union of aliases (order-preserving); first full/short names win.
+        Provenance ids are unioned too — a character seen in several units
+        carries every unit it was found in."""
         kept_aliases = kept.setdefault("aliases", [])
         for alias in duplicate.get("aliases", []):
             if alias and alias not in kept_aliases:
                 kept_aliases.append(alias)
+        kept_ids = kept.setdefault(self.SOURCE_ID_KEY, [])
+        for unit_id in duplicate.get(self.SOURCE_ID_KEY, []):
+            if unit_id and unit_id not in kept_ids:
+                kept_ids.append(unit_id)
