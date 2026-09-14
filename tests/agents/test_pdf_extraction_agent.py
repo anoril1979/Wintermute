@@ -79,6 +79,21 @@ class _StubSourceIndexer:
         return None
 
 
+class _StubKnowledgeExtractor:
+    """Knowledge-extraction double: OK without Ollama or cache writes."""
+
+    name = "character_extractor"
+
+    def run(self, context):
+        from src.agents.protocols import AgentResult
+
+        return AgentResult(agent_name=self.name, status=AgentStatus.OK,
+                           payload={"characters": [], "llm_calls": 0})
+
+    def validate(self, context):
+        return None
+
+
 class RegistryTest(unittest.TestCase):
     def test_default_registry_has_content_extractor(self):
         registry = build_default_agents()
@@ -213,22 +228,28 @@ class OrchestratorPlugTest(unittest.TestCase):
 
     def _registry(self, **overrides):
         """The default registry with hermetic extraction + summarization
-        stores and the real extractor/indexer swapped for stubs."""
+        + knowledge stores and the real extractor/indexer/LLM swapped for
+        stubs."""
+        from src.agents.agents.character_extraction_agent import CharacterExtractionAgent
         from src.agents.agents.summarizer_agent import SummarizerAgent
 
         registry = build_default_agents()
         registry["summarizer"] = SummarizerAgent(job_file=self._summarizer_jobs)
+        # The knowledge extractor makes real LLM calls and writes the real
+        # data/cache/knowledge folder: stub it like the indexer.
+        registry["knowledge_extractor"] = _StubKnowledgeExtractor()
         registry.update(overrides)
         return registry
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_run_ingestion_file_completes_extraction_step(self):
-        """With the real registry shape (stubbed extractor), the graph runs
-        content_extraction, extraction_validation, hierarchical_summarization
-        AND source_indexing (all implemented), then stops at the
-        not-yet-implemented knowledge_extraction step."""
+    def test_run_ingestion_file_completes_source_indexing_step(self):
+        """With the real registry shape (stubbed extractor/indexer), the
+        graph runs content_extraction, extraction_validation,
+        hierarchical_summarization, source_indexing AND knowledge_extraction
+        (all implemented), then stops at the not-yet-implemented
+        knowledge_validation step."""
         from src.ingestion.ingestion_orchestrator import run_ingestion_file
 
         stub = StubExtractor(document=make_document(self.pdf_path))
@@ -248,10 +269,11 @@ class OrchestratorPlugTest(unittest.TestCase):
         self.assertEqual(
             result["completed_steps"],
             ["content_extraction", "extraction_validation",
-             "hierarchical_summarization", "source_indexing"],
+             "hierarchical_summarization", "source_indexing",
+             "knowledge_extraction"],
         )
-        self.assertEqual(result["not_implemented_steps"], ["knowledge_extraction"])
-        self.assertEqual(result["failed_step"], "knowledge_extraction")
+        self.assertEqual(result["not_implemented_steps"], ["knowledge_validation"])
+        self.assertEqual(result["failed_step"], "knowledge_validation")
 
     def test_content_free_extraction_is_rejected_by_validation(self):
         """An extraction with no content at all passes the structural gate

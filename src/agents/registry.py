@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Dict
 
 from src.agents.agents.answer_agent import AnswerAgent
+from src.agents.agents.character_extraction_agent import CharacterExtractionAgent
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
 from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
@@ -30,6 +31,8 @@ def build_default_agents() -> Dict[str, IngestionAgent]:
         "extraction_validator": ExtractionValidationAgent(),
         "summarizer": SummarizerAgent(),
         "source_indexer": SourceIndexingAgent(),
+        # First knowledge pass: LLM extraction of the characters.
+        "knowledge_extractor": CharacterExtractionAgent(),
     }
 
 

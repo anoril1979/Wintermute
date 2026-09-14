@@ -125,6 +125,24 @@ models:
     max_retries: 2
     description: "Modèle par défaut pour toute tâche non explicitement routée"
 
+  # Rôle dédié à la première étape de connaissance (knowledge_extraction,
+  # src/agents/agents/character_extraction_agent.py) : identification et
+  # extraction structurée du contenu des sources — les personnages d'abord
+  # (nom complet, nom court, alias), puis lieux, organisations, objets,
+  # événements et claims. Réponse JSON stricte attendue ; température
+  # basse : la fidélité au texte prime sur l'interprétation.
+  knowledge_extractor:
+    model_name: "qwen3"
+    temperature: 0.1
+    max_response_tokens: 2048
+    timeout_seconds: 60
+    top_p: 0.95
+    context_window: 8192        # fenêtre de contexte (option Ollama num_ctx)
+    keep_alive: "5m"
+    thinking: false             # mode raisonnement (option Ollama think)
+    max_retries: 2
+    description: "Extrait la connaissance des sources (personnages : full_name/short_name/aliases) en JSON strict"
+
   # Rôle dédié à l'indexation vectorielle (src/indexing) : production des
   # embeddings stockés dans ChromaDB. Un modèle d'embedding ne génère pas de
   # texte : pas de température ni de budget de génération, seule la fiabilité

@@ -8,6 +8,7 @@ The ingestion pipeline projects one source document onto several stores:
                                    summarization)
     data/extracted/<stem>.json     the canonical extracted content
     data/summarized/<stem>.json    the LLM summaries
+    data/cache/knowledge/<stem>.json  the knowledge cache (characters...)
     data/extracted/mineru/<stem>/  MinerU's own sandbox (PDFs only)
 
 Removing a document from the corpus means cleaning **every projection**
@@ -123,7 +124,8 @@ def _remove_job_entries(file_name: str) -> Dict[str, Any]:
 
 
 def _remove_json_files(source_path: Optional[Path], stem: str) -> Dict[str, Any]:
-    """Remove the canonical and summarized JSONs for the document stem."""
+    """Remove the canonical, summarized and knowledge-cache JSONs for the
+    document stem."""
     removed: list[str] = []
     reasons: list[str] = []
 
@@ -140,6 +142,12 @@ def _remove_json_files(source_path: Optional[Path], stem: str) -> Dict[str, Any]
         targets.append(("summarized", summarized_path_for(Path(f"{stem}.pdf"))))
     except Exception:
         pass  # config problem already reported via the canonical path
+    try:
+        from src.knowledge.character_cache import knowledge_cache_path_for
+
+        targets.append(("knowledge", knowledge_cache_path_for(Path(f"{stem}.pdf"))))
+    except Exception as exc:  # noqa: BLE001 — reported, not raised
+        reasons.append(f"knowledge cache path: {exc}")
 
     for label, path in targets:
         try:

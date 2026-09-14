@@ -8,7 +8,8 @@
 # 2. Extraction output: where the MinerU PDF extractor writes
 #    its artifacts and how its JSON output file is named.
 # 3. Summarization: LLM summaries persistence + size settings.
-# 4. CLI logging: where the ingest/remove scripts write their durable log.
+# 4. Knowledge extraction: LLM knowledge pass persistence + granularity.
+# 5. CLI logging: where the ingest/remove scripts write their durable log.
 # ============================================================
 
 # Root folder where ingestable documents live (relative to the
@@ -85,7 +86,23 @@ summarization_job_file: "data/cache/summarization_jobs.json"
 summary_min_chars: 1000
 summary_max_chars: 2500
 
-# 4. CLI logging — durable log of the ingestion CLI (scripts/ingest.py,
+# 4. Knowledge extraction — first step of the knowledge layer: the
+#    CharacterExtractionAgent reads the summarized document and extracts
+#    the characters (full name, short name, aliases) it finds, one LLM
+#    pass per content unit. Two settings:
+#
+#    a) knowledge_output_dir: where the extracted knowledge is stored, as
+#       <document stem>.json. Written after a successful pass; the file is
+#       plain, human-readable and human-editable JSON (no envelope).
+#
+#    b) knowledge_unit_granularity: the content unit fed to the LLM —
+#       "section" (default, smallest unit still carrying heading context),
+#       "page" (page raw_text) or "chapter" (chapter full_text). Going
+#       finer than a section would lose the context the extractor needs.
+knowledge_output_dir: "data/cache/knowledge"
+knowledge_unit_granularity: "section"
+
+# 5. CLI logging — durable log of the ingestion CLI (scripts/ingest.py,
 #    scripts/remove.py). Every issue, warning and error survives the console
 #    session there. Relative to the project root; absolute paths are also
 #    accepted.

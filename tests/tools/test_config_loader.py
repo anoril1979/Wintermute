@@ -181,6 +181,46 @@ class ExtractionSettingsValidationTest(unittest.TestCase):
         self.assertEqual(validate_ingestion_config(config), config)
 
 
+class KnowledgeSettingsValidationTest(unittest.TestCase):
+    def test_wrong_type_is_named(self):
+        config = _valid_config()
+        config["knowledge_output_dir"] = 42
+        with self.assertRaises(IngestionConfigError) as ctx:
+            validate_ingestion_config(config)
+        self.assertIn("'knowledge_output_dir'", str(ctx.exception))
+
+    def test_output_dir_traversal_rejected(self):
+        config = _valid_config()
+        config["knowledge_output_dir"] = "data/../elsewhere"
+        with self.assertRaises(IngestionConfigError) as ctx:
+            validate_ingestion_config(config)
+        self.assertIn("'knowledge_output_dir'", str(ctx.exception))
+
+    def test_valid_output_dir_passes(self):
+        config = _valid_config()
+        config["knowledge_output_dir"] = "data/cache/knowledge"
+        validate_ingestion_config(config)  # no raise
+
+    def test_granularity_valid_values(self):
+        config = _valid_config()
+        for value in ("section", "page", "chapter"):
+            config["knowledge_unit_granularity"] = value
+            validate_ingestion_config(config)  # no raise
+
+    def test_granularity_invalid_value(self):
+        config = _valid_config()
+        config["knowledge_unit_granularity"] = "block"
+        with self.assertRaises(IngestionConfigError) as ctx:
+            validate_ingestion_config(config)
+        self.assertIn("'knowledge_unit_granularity'", str(ctx.exception))
+
+    def test_granularity_wrong_type(self):
+        config = _valid_config()
+        config["knowledge_unit_granularity"] = 3
+        with self.assertRaises(IngestionConfigError):
+            validate_ingestion_config(config)
+
+
 class IngestionLogValidationTest(unittest.TestCase):
     """The ingestion CLI's durable log path (scripts/ingest.py)."""
 

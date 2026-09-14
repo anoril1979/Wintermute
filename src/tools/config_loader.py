@@ -402,7 +402,11 @@ def validate_ingestion_config(config: object) -> dict:
       targets the second one);
     * optional ``ingestion_log`` is a string, usable (non-traversal) path
       reference when present — the durable log of the ingestion CLI
-      (scripts/ingest.py, scripts/remove.py).
+      (scripts/ingest.py, scripts/remove.py);
+    * optional knowledge-extraction settings ``knowledge_output_dir``
+      (path where the knowledge cache files are stored) and
+      ``knowledge_unit_granularity`` (content unit fed to the knowledge
+      LLM: 'section', 'page' or 'chapter').
 
     Returns the same dict on success, so callers can do
     ``config = validate_ingestion_config(config)``.
@@ -532,7 +536,7 @@ def validate_ingestion_config(config: object) -> dict:
 
     # -- optional extraction settings ---------------------------------------
     for key in ("extraction_output_dir", "extraction_mineru_output_dir",
-                "summarization_output_dir",
+                "summarization_output_dir", "knowledge_output_dir",
                 "mineru_json_extension", "extraction_job_file",
                 "summarization_job_file"):
         if key not in config:
@@ -549,7 +553,7 @@ def validate_ingestion_config(config: object) -> dict:
                 "(supprimez la clé pour utiliser la valeur par défaut)."
             )
         if key in ("extraction_output_dir", "extraction_mineru_output_dir",
-                   "summarization_output_dir",
+                   "summarization_output_dir", "knowledge_output_dir",
                    "extraction_job_file", "summarization_job_file") \
                 and not _is_valid_relative_path(value):
             raise IngestionConfigError(
@@ -567,6 +571,17 @@ def validate_ingestion_config(config: object) -> dict:
                     f"{prefix} : 'mineru_json_extension' ({value!r}) doit "
                     "commencer par '.' ou '_' (ex. \"_content_list.json\")."
                 )
+
+    # -- optional knowledge-extraction settings -------------------------------
+    if "knowledge_unit_granularity" in config:
+        value = config["knowledge_unit_granularity"]
+        allowed = ("section", "page", "chapter")
+        if not isinstance(value, str) or value.strip().lower() not in allowed:
+            raise IngestionConfigError(
+                f"{prefix} : 'knowledge_unit_granularity' ({value!r}) doit être "
+                f"une des valeurs {', '.join(allowed)} — l'unité de contenu "
+                "envoyée au LLM de connaissance."
+            )
 
     return config
 
