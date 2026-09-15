@@ -9,8 +9,11 @@ implementations live beside it (``chroma_client.py`` for the store,
 Scope today: **storage, vector retrieval and index maintenance**.
 ``query_by_vector`` is the real query seam (the retrieval layer embeds the
 question, the store never does); text queries remain an honest stub.
-``delete_document`` is real: corpus maintenance (dedup, out-of-corpus
-removal) deletes a document's projection by its unified ``doc_id``.
+``get_unit_chunks`` is the identity seam: no similarity, a unit's stored
+chunks fetched by their unified id prefix — the deterministic join the
+knowledge-lookup flow builds on. ``delete_document`` is real: corpus
+maintenance (dedup, out-of-corpus removal) deletes a document's projection
+by its unified ``doc_id``.
 
 The ``runtime_checkable`` decorators allow ``isinstance(...)`` sanity checks
 (method presence only — they do not verify signatures).
@@ -126,6 +129,37 @@ class VectorStoreProtocol(Protocol):
 
     def count(self) -> int:
         """Number of chunks currently stored (trivial today, kept for symmetry)."""
+        ...
+
+    def get_unit_chunks(self, unit_prefix: str, *, limit: int = 20) -> list[VectorChunk]:
+        """Identity-based fetch of one content unit's stored chunks.
+
+        The deterministic counterpart of :meth:`query_by_vector`: no
+        similarity, pure identity. A knowledge source id (the unified id
+        chain stored on every alias — ``doc:<hex>::chp:1::pg:1::sec:2``)
+        is the id-prefix of that unit's stored chunks: its text blocks
+        (``...::txt:N``) and its summary (``...::sum``). Used by the
+        knowledge-lookup flow to expand opaque provenance ids into the
+        actual content, deterministically.
+
+        Args:
+            unit_prefix: the unit's full hierarchical id. A bare document
+                id (no ``::`` unit part) is refused — use
+                ``delete_document``/``count_document`` for whole-document
+                operations.
+            limit: maximum chunks returned, safety cap (reading order).
+
+        Returns:
+            The unit's chunks in reading order (blocks first, summary
+            last), scores unset. Empty list for an unknown unit or a
+            never-materialized store (deleting from nothing deletes
+            nothing; fetching from nothing fetches nothing).
+
+        Raises:
+            ValueError: malformed ``unit_prefix`` or non-positive ``limit``.
+            VectorStoreUnavailableError: the store could not be opened.
+            VectorStoreError: the backend refused the read.
+        """
         ...
 
     def delete_document(self, doc_id: str) -> int:

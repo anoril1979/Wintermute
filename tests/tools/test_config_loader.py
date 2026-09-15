@@ -351,6 +351,34 @@ class RetrievalConfigValidationTest(unittest.TestCase):
         config = self._valid_config()
         self.assertIs(validate_retrieval_config(config), config)
 
+    def test_lookup_max_content_hits_is_optional(self):
+        config = self._valid_config()
+        self.assertIs(validate_retrieval_config(config), config)
+
+    def test_lookup_max_content_hits_roundtrip(self):
+        config = self._valid_config()
+        config["lookup_max_content_hits"] = 12
+        self.assertIs(validate_retrieval_config(config), config)
+
+    def test_lookup_max_content_hits_rejects_non_positive(self):
+        for bad in (0, -3, True, 2.5, "8"):
+            config = self._valid_config()
+            config["lookup_max_content_hits"] = bad
+            with self.assertRaises(RetrievalConfigError, msg=repr(bad)) as ctx:
+                validate_retrieval_config(config)
+            self.assertIn("lookup_max_content_hits", str(ctx.exception))
+
+    def test_real_retrieval_yaml_loads(self):
+        """The shipped retrieval.yaml must pass its own validation."""
+        config = load_retrieval_config()
+        self.assertGreater(config["default_top_k"], 0)
+        self.assertGreaterEqual(config["max_top_k"], config["default_top_k"])
+        self.assertIsInstance(config.get("query_instruction", ""), str)
+        self.assertGreater(
+            config.get("lookup_max_content_hits", 0), 0,
+            "the shipped retrieval.yaml must carry a positive content cap",
+        )
+
     def test_real_retrieval_yaml_loads(self):
         """The shipped retrieval.yaml must pass its own validation."""
         config = load_retrieval_config()

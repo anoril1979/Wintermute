@@ -20,8 +20,10 @@ from src.knowledge.character_markdown_store import (
     write_index,
 )
 from src.knowledge.entity_lookup import (
+    DEFAULT_MAX_CONTENT_HITS,
     EntityMatch,
     close_candidates,
+    fetch_unit_content,
     fold_name,
     known_entity_count,
     resolve_entity,
@@ -163,6 +165,83 @@ class EntityLookupTest(unittest.TestCase):
         empty = Path(tempfile.mkdtemp(prefix="wm_entity_empty_"))
         self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
         self.assertEqual(known_entity_count(empty), 0)
+
+
+class FetchUnitContentTest(unittest.TestCase):
+    """The vector companion: opaque source ids -> actual corpus content."""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="wm_fetch_unit_"))
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+
+    def test_dedupes_and_keeps_first_seen_order(self):
+        class _Store:
+            def __init__(self):
+                self.asked: list[str] = []
+
+            def get_unit_chunks(self, prefix, *, limit):
+                self.asked.append(prefix)
+                return []
+
+        store = _Store()
+        fetch_unit_content(
+            ["doc:aa::chp:1::sec:2", "doc:aa::chp:1::sec:1",
+             "doc:aa::chp:1::sec:2", "  ", "doc:aa::chp:1::sec:2"],
+            store=store,
+        )
+        self.assertEqual(store.asked,
+                         ["doc:aa::chp:1::sec:2", "doc:aa::chp:1::sec:1"])
+
+    def test_unknown_units_are_skipped_not_failed(self):
+        class _Store:
+            def get_unit_chunks(self, prefix, *, limit):
+                return []
+
+        self.assertEqual(fetch_unit_content(
+            ["doc:zzzzzzzz::chp:9::sec:9"], store=_Store(), max_hits=4,
+        ), [])
+
+    def test_store_failure_is_swallowed(self):
+        class _Store:
+            def get_unit_chunks(self, prefix, *, limit):
+                raise RuntimeError("store down")
+
+        self.assertEqual(fetch_unit_content(
+            ["doc:aa::chp:1::sec:1"], store=_Store(), max_hits=4,
+        ), [])
+
+    def test_cap_applies_across_units(self):
+        class _Store:
+            def get_unit_chunks(self, prefix, *, limit):
+                self.last_limit = limit
+                return [f"chunk-of-{prefix}-{i}" for i in range(4)]
+
+        store = _Store()
+        chunks = fetch_unit_content(
+            ["doc:aa::chp:1::sec:1", "doc:aa::chp:1::sec:2"],
+            store=store, max_hits=6,
+        )
+        self.assertEqual(store.last_limit, 6, "fetches are capped per unit")
+        self.assertEqual(len(chunks), 6, "the global cap holds")
+        self.assertEqual(chunks[0], "chunk-of-doc:aa::chp:1::sec:1-0")
+        self.assertEqual(chunks[-1], "chunk-of-doc:aa::chp:1::sec:2-1")
+
+    def test_empty_ids_fetch_nothing(self):
+        self.assertEqual(fetch_unit_content([], store=object()), [])
+
+    def test_config_cap_failure_fails_open_to_default(self):
+        import unittest.mock
+
+        from src.knowledge import entity_lookup
+
+        with unittest.mock.patch(
+            "src.tools.config_loader.load_retrieval_config",
+            side_effect=RuntimeError("no config"),
+        ):
+            self.assertEqual(
+                entity_lookup._config_max_content_hits(),
+                DEFAULT_MAX_CONTENT_HITS,
+            )
 
 
 if __name__ == "__main__":

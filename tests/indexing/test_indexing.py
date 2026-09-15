@@ -330,6 +330,103 @@ class ChromaClientTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.client.delete_document("   ")
 
+    # -- identity-based fetch (get_unit_chunks) ---------------------------------
+
+    def test_get_unit_chunks_returns_one_units_content_in_reading_order(self):
+        """The knowledge-lookup companion: a knowledge source id
+        (doc:x::chp:1::pg:1::sec:1) fetches that unit's stored chunks —
+        blocks first (numeric order), its summary last."""
+        chunks = self._embedded_chunks(len(build_source_chunks(_doc())))
+        self.client.upsert(chunks)
+        doc_id = chunks[0].metadata["doc_id"]
+
+        unit_prefix = f"{doc_id}::chp:1::pg:1::sec:1"
+        fetched = self.client.get_unit_chunks(unit_prefix)
+
+        self.assertTrue(fetched)
+        # Only chunks chained under that exact unit.
+        self.assertTrue(
+            all(c.id.startswith(unit_prefix + "::") for c in fetched))
+        # Reading order: txt:1 before txt:2, the summary last.
+        ids = [c.id for c in fetched]
+        self.assertIn(f"{unit_prefix}::txt:1", ids)
+        self.assertEqual(ids[-1], f"{unit_prefix}::sum")
+        self.assertLess(ids.index(f"{unit_prefix}::txt:1"),
+                        ids.index(f"{unit_prefix}::txt:2"))
+        # Identity fetch: no similarity score is computed.
+        self.assertTrue(all(c.score is None for c in fetched))
+
+    def test_get_unit_chunks_is_confined_to_the_unit(self):
+        """A section fetch must not leak the page/chapter summaries or a
+        sibling section's blocks."""
+        chunks = self._embedded_chunks(len(build_source_chunks(_doc())))
+        self.client.upsert(chunks)
+        doc_id = chunks[0].metadata["doc_id"]
+
+        fetched_ids = {c.id for c in
+                       self.client.get_unit_chunks(f"{doc_id}::chp:1::pg:1::sec:1")}
+        self.assertNotIn(f"{doc_id}::chp:1::pg:1::sum", fetched_ids)
+        self.assertNotIn(f"{doc_id}::chp:1::sum", fetched_ids)
+        self.assertNotIn(f"{doc_id}::sum", fetched_ids)
+        self.assertNotIn(f"{doc_id}::chp:1::pg:1::sec:1::sum::x", fetched_ids)
+
+    def test_get_unit_chunks_sorts_two_digit_blocks_numerically(self):
+        """Reading order must be numeric (txt:2 < txt:10), not string
+        order — the fixture only has one-digit ids, so synthesize a
+        store with a ten-block unit."""
+        meta = {"doc_id": "doc:aaaaaaaa", "full_id": ""}
+        rows = []
+        for i in range(1, 12):
+            full_id = f"doc:aaaaaaaa::chp:1::pg:1::sec:1::txt:{i}"
+            rows.append(VectorChunk(id=full_id, text=f"block {i}",
+                                    metadata={**meta, "full_id": full_id},
+                                    vector=[0.1] * 8))
+        full_id = "doc:aaaaaaaa::chp:1::pg:1::sec:1::sum"
+        rows.append(VectorChunk(id=full_id, text="unit summary",
+                                metadata={**meta, "full_id": full_id},
+                                vector=[0.1] * 8))
+        self.client.upsert(rows)
+
+        ids = [c.id for c in
+               self.client.get_unit_chunks("doc:aaaaaaaa::chp:1::pg:1::sec:1")]
+        self.assertEqual(
+            ids[:3],
+            ["doc:aaaaaaaa::chp:1::pg:1::sec:1::txt:1",
+             "doc:aaaaaaaa::chp:1::pg:1::sec:1::txt:2",
+             "doc:aaaaaaaa::chp:1::pg:1::sec:1::txt:3"],
+            "txt:2 must sort before txt:10 (numeric order)",
+        )
+        self.assertEqual(ids[-1], "doc:aaaaaaaa::chp:1::pg:1::sec:1::sum")
+
+    def test_get_unit_chunks_unknown_unit_returns_empty(self):
+        chunks = self._embedded_chunks(2)
+        self.client.upsert(chunks)
+        self.assertEqual(
+            self.client.get_unit_chunks("doc:00000000::chp:9::sec:9"), [])
+
+    def test_get_unit_chunks_on_missing_store_returns_empty(self):
+        self.assertEqual(
+            self.client.get_unit_chunks("doc:abcdef12::chp:1::sec:1"), [])
+        self.assertFalse((self.tmp / "chroma.sqlite3").exists(),
+                         "fetching must never materialize the store")
+
+    def test_get_unit_chunks_rejects_bare_document_id(self):
+        with self.assertRaises(ValueError):
+            self.client.get_unit_chunks("doc:abcdef12")
+
+    def test_get_unit_chunks_rejects_non_positive_limit(self):
+        with self.assertRaises(ValueError):
+            self.client.get_unit_chunks("doc:abcdef12::chp:1::sec:1", limit=0)
+
+    def test_get_unit_chunks_honors_the_limit(self):
+        chunks = self._embedded_chunks(len(build_source_chunks(_doc())))
+        self.client.upsert(chunks)
+        doc_id = chunks[0].metadata["doc_id"]
+        fetched = self.client.get_unit_chunks(
+            f"{doc_id}::chp:1::pg:1::sec:1", limit=1)
+        self.assertEqual(len(fetched), 1)
+        self.assertEqual(fetched[0].id, f"{doc_id}::chp:1::pg:1::sec:1::txt:1")
+
     def test_unknown_collection_key(self):
         with self.assertRaises(Exception):
             ChromaVectorClient("no_such_key", path=str(self.tmp))

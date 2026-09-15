@@ -25,6 +25,34 @@ def _entry(alias: str, *source_ids: str) -> dict:
     return {"alias": alias, "source_ids": list(source_ids)}
 
 
+class _StubVectorStore:
+    """The vector companion, faked: unit prefix -> canned content chunks.
+
+    Mirrors the real ``get_unit_chunks`` contract: reading-order list of
+    VectorChunk, ``[]`` for an unknown unit, raisable for store failures.
+    """
+
+    def __init__(self, units=None, error=None):
+        self.units = dict(units or {})
+        self.error = error
+        self.asked: list[str] = []
+
+    def get_unit_chunks(self, prefix, *, limit=20):
+        from src.indexing.chunks import VectorChunk
+
+        self.asked.append(prefix)
+        if self.error is not None:
+            raise self.error
+        rows = self.units.get(prefix, [])
+        return [
+            VectorChunk(id=unit_id, text=text,
+                        metadata={"doc_title": unit_id.split("::")[0],
+                                  "level": "block", "kind": "content"},
+                        score=None)
+            for unit_id, text in rows[:limit]
+        ]
+
+
 class _KnowledgeBaseMixin:
     """A temp knowledge base with two characters (Joe + a sword)."""
 
@@ -63,7 +91,10 @@ class _KnowledgeBaseMixin:
 class KnowledgeLookupAgentTest(_KnowledgeBaseMixin, unittest.TestCase):
     def setUp(self):
         self.base = self.make_base()
-        self.agent = KnowledgeLookupAgent(base_dir=self.base)
+        # Empty stub store: unit tests stay hermetic (no real vector DB
+        # is ever opened) and resolved hits stay identity-card only.
+        self.agent = KnowledgeLookupAgent(base_dir=self.base,
+                                          store=_StubVectorStore())
 
     def _context(self, entity=None, language="en", question="q"):
         context = RetrievalContext(question=question)
@@ -150,6 +181,88 @@ class KnowledgeLookupAgentTest(_KnowledgeBaseMixin, unittest.TestCase):
         validation = self.agent.validate(context)
         self.assertIsNotNone(validation)
 
+    # -- the vector companion ----------------------------------------------------
+
+    def test_hit_expands_source_ids_into_stored_content(self):
+        """The identity card stays hit #1; the units its opaque ids point
+        at are fetched from the vector store (by id, no similarity) and
+        appended in the knowledge base's reading order."""
+        store = _StubVectorStore({
+            "doc:aaaaaaaa::chp:1::pg:1::sec:1": [
+                ("doc:aaaaaaaa::chp:1::pg:1::sec:1::txt:1",
+                 "Joeleans on the wall of the Rusty Lantern."),
+                ("doc:aaaaaaaa::chp:1::pg:1::sec:1::sum",
+                 "Section summary mentioning Joe."),
+            ],
+            "doc:aaaaaaaa::chp:1::pg:1::sec:2": [
+                ("doc:aaaaaaaa::chp:1::pg:1::sec:2::txt:1",
+                 "Bobby, says the barman, never pays his tabs."),
+            ],
+        })
+        agent = KnowledgeLookupAgent(base_dir=self.base, store=store)
+        context = self._context(entity="Joe le Clodo")
+
+        result = agent.run(context)
+
+        self.assertEqual(result.status.value, "ok")
+        hits = context.outputs["hits"]
+        self.assertEqual(len(hits), 4)
+        # 1) the identity card, untouched, score 1.0
+        self.assertEqual(hits[0].metadata["kind"], "entity")
+        self.assertEqual(hits[0].score, 1.0)
+        # 2) unit content, deduped (sec:2 backs the alias 'Bobby' AND is
+        # cited in the identity block) and in knowledge-base order.
+        self.assertEqual(hits[1].text, "Joeleans on the wall of the Rusty Lantern.")
+        self.assertEqual(hits[2].id, "doc:aaaaaaaa::chp:1::pg:1::sec:1::sum")
+        self.assertEqual(hits[3].text, "Bobby, says the barman, never pays his tabs.")
+        self.assertIsNone(hits[3].score, "identity fetch computes no similarity")
+        self.assertEqual(context.metadata["content_chunks_fetched"], 3)
+        self.assertEqual(len(store.asked), 2)
+
+    def test_unknown_units_and_store_failures_degrade_to_identity_only(self):
+        store = _StubVectorStore(error=RuntimeError("store down"))
+        agent = KnowledgeLookupAgent(base_dir=self.base, store=store)
+        context = self._context(entity="Joe le Clodo")
+
+        result = agent.run(context)
+
+        self.assertEqual(result.status.value, "ok")
+        hits = context.outputs["hits"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].metadata["kind"], "entity")
+        self.assertEqual(context.metadata["content_chunks_fetched"], 0)
+
+    def test_no_content_fetch_without_a_store(self):
+        """No store configured and the vector client unavailable → the
+        lookup still answers from the identity card alone."""
+        import unittest.mock
+
+        with unittest.mock.patch(
+            "src.indexing.chroma_client.ChromaVectorClient",
+            side_effect=RuntimeError("no store"),
+        ):
+            context = self._context(entity="Joe le Clodo")
+            result = self.agent.run(context)
+        self.assertEqual(result.status.value, "ok")
+        self.assertEqual(len(context.outputs["hits"]), 1)
+
+    def test_content_cap_limits_the_fetched_chunks(self):
+        store = _StubVectorStore({
+            "doc:aaaaaaaa::chp:1::pg:1::sec:1": [
+                ("doc:aaaaaaaa::chp:1::pg:1::sec:1::txt:%d" % i,
+                 f"passage {i}") for i in range(1, 6)
+            ],
+        })
+        agent = KnowledgeLookupAgent(
+            base_dir=self.base, store=store, max_content_hits=3)
+        context = self._context(entity="Joe le Clodo")
+
+        agent.run(context)
+
+        hits = context.outputs["hits"]
+        self.assertEqual(len(hits), 4, "identity card + 3 capped content chunks")
+        self.assertEqual(context.metadata["content_chunks_fetched"], 3)
+
 
 # ---------------------------------------------------------------------------
 # Graph wiring: lookup runs, then the answer step
@@ -186,7 +299,8 @@ class RetrievalGraphLookupWiringTest(_KnowledgeBaseMixin, unittest.TestCase):
         from src.graphs.retrieval_graph import RetrievalGraph
 
         return RetrievalGraph(agents={
-            "knowledge_lookup": KnowledgeLookupAgent(base_dir=self.base),
+            "knowledge_lookup": KnowledgeLookupAgent(
+                base_dir=self.base, store=_StubVectorStore()),
             "answerer": answerer,
         })
 
@@ -223,6 +337,47 @@ class RetrievalGraphLookupWiringTest(_KnowledgeBaseMixin, unittest.TestCase):
         self.assertEqual(len(llm.prompts), 0)
         self.assertIn("No entity named 'Fantôme'", context.outputs["answer"])
 
+    def test_answer_prompt_receives_the_fetched_unit_content(self):
+        """The end-to-end point of the vector companion: the answerer's
+        prompt carries the identity card AND the actual passages fetched
+        from the vector store by the entity's opaque source ids."""
+        from src.agents.agents.answer_agent import AnswerAgent
+        from src.graphs.retrieval_graph import RetrievalGraph
+
+        store = _StubVectorStore({
+            "doc:aaaaaaaa::chp:1::pg:1::sec:1": [
+                ("doc:aaaaaaaa::chp:1::pg:1::sec:1::txt:1",
+                 "Joe leans on the wall of the Rusty Lantern."),
+                ("doc:aaaaaaaa::chp:1::pg:1::sec:1::sum",
+                 "Section summary: Joe drinks at the Lantern."),
+            ],
+            "doc:aaaaaaaa::chp:1::pg:1::sec:2": [
+                ("doc:aaaaaaaa::chp:1::pg:1::sec:2::txt:1",
+                 "Bobby never pays his tabs, says the barman."),
+            ],
+        })
+        llm = _StubLLM()
+        graph = RetrievalGraph(agents={
+            "knowledge_lookup": KnowledgeLookupAgent(
+                base_dir=self.base, store=store),
+            "answerer": AnswerAgent(llm=llm),
+        })
+        context = RetrievalContext(question="who is Joe le Clodo?")
+        context.metadata["entity"] = "Joe le Clodo"
+        context.metadata["language"] = "en"
+
+        outcome = graph.run(context, kind="lookup")
+
+        self.assertTrue(outcome.ok)
+        prompt = llm.prompts[0]
+        # The identity block (grounding)...
+        self.assertIn("known names and where they appear", prompt)
+        self.assertIn("doc:aaaaaaaa::chp:1::pg:1::sec:2", prompt)
+        # ...AND the actual content those opaque ids point at — the
+        # answerer can phrase from real passages, not bare chains.
+        self.assertIn("Joe leans on the wall of the Rusty Lantern.", prompt)
+        self.assertIn("Bobby never pays his tabs, says the barman.", prompt)
+
     def test_relationship_kind_is_still_not_implemented(self):
         graph = self._graph(_StubAnswerer())
         outcome = graph.run(RetrievalContext(question="who is his wife?"),
@@ -245,7 +400,8 @@ class RetrievalOrchestratorLookupFlowTest(_KnowledgeBaseMixin, unittest.TestCase
         from src.retrieval.retrieval_router import RetrievalFacts
 
         graph = RetrievalGraph(agents={
-            "knowledge_lookup": KnowledgeLookupAgent(base_dir=self.base),
+            "knowledge_lookup": KnowledgeLookupAgent(
+                base_dir=self.base, store=_StubVectorStore()),
         })
         import unittest.mock
 
@@ -295,7 +451,8 @@ class RetrievalOrchestratorLookupFlowTest(_KnowledgeBaseMixin, unittest.TestCase
         from src.retrieval.retrieval_orchestrator import run_retrieval
 
         graph = RetrievalGraph(agents={
-            "knowledge_lookup": KnowledgeLookupAgent(base_dir=self.base),
+            "knowledge_lookup": KnowledgeLookupAgent(
+                base_dir=self.base, store=_StubVectorStore()),
         })
         import unittest.mock
 

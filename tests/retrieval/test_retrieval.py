@@ -871,10 +871,19 @@ class BatchOrchestratorTest(unittest.TestCase):
         )
         from src.graphs.retrieval_graph import RetrievalGraph
 
+        # Empty stub store: the lookup's vector companion stays hermetic
+        # (no real vector DB opened from a test).
+        from src.indexing.chunks import VectorChunk
+
+        class _NoContentStore:
+            def get_unit_chunks(self, prefix, *, limit=20):
+                return []
+
         return RetrievalGraph(agents={
             "semantic_retriever": SemanticRetrievalAgent(
                 embedder=self.embedder, store=self.store, instruction=""),
-            "knowledge_lookup": KnowledgeLookupAgent(base_dir=self.kb),
+            "knowledge_lookup": KnowledgeLookupAgent(
+                base_dir=self.kb, store=_NoContentStore()),
         })
 
     def test_king_of_the_north_compound_prompt(self):

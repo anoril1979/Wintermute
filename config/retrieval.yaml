@@ -42,3 +42,11 @@ query_instruction: "Instruct: Given a user query about a tabletop RPG fictional 
 # chunks indexed by the SourceIndexingAgent. Knowledge chunks get their
 # own key when the knowledge layer lands.
 source_collection_key: "source_chunks"
+
+# Knowledge-lookup companion: when a lookup resolves an entity, the
+# vector store fetches the ACTUAL content its opaque source ids point at
+# (the unit's text blocks + summary, by id — no similarity). This caps
+# how many content chunks are appended after the identity card, so one
+# broad character (many aliases, many units) cannot flood the answerer's
+# context. The identity card itself is never truncated.
+lookup_max_content_hits: 8

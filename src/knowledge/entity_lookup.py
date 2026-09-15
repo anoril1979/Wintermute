@@ -258,10 +258,129 @@ def known_entity_count(base_dir: Optional[Path] = None) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# The vector companion — opaque source ids -> actual corpus content
+# ---------------------------------------------------------------------------
+
+#: Default cap on content chunks fetched per unit, when no store override
+#: carries one (must stay in sync with config/retrieval.yaml's
+#: ``lookup_max_content_hits``).
+DEFAULT_MAX_CONTENT_HITS = 8
+
+
+def fetch_unit_content(
+    source_ids: List[str],
+    store=None,
+    *,
+    max_hits: Optional[int] = None,
+) -> List[object]:
+    """Expand knowledge source ids into their actual stored content.
+
+    The deterministic vector companion of the markdown lookup: an alias's
+    ``source_ids`` (``doc:<hex>::chp:1::pg:1::sec:2``) are OPAQUE chains
+    — exact, stable, unreadable for an LLM phrasing an answer. Each chain
+    is the id-prefix of that unit's stored chunks (its text blocks and its
+    ``::sum`` summary — the unified id scheme restarts every counter at
+    its parent), so the vector store fetches the unit's whole projection
+    by identity, no similarity involved.
+
+    Deterministic and quiet by design:
+
+    * ids are deduped (the same unit may back several aliases) and the
+      first-seen order of ``source_ids`` is kept — that order is the
+      knowledge base's own reading order;
+    * a chain that stores nothing (unknown unit, never-indexed document,
+      pruned corpus) is logged and skipped — content the corpus no longer
+      holds must not fail a lookup, the identity block already grounds
+      the answer;
+    * a vector-store failure is logged and swallowed the same way: a
+      lookup answers even with the store down (it reads the markdown
+      base, the store is an enrichment);
+    * the global cap keeps one broad character (hundreds of aliases,
+      many units) from flooding the answerer's context — the first units
+      of the knowledge base's order win, the identity card is never
+      truncated.
+
+    Args:
+        source_ids: the unified id chains recorded on the entity (any
+            order, duplicates allowed).
+        store: the vector store client; the retrieval.yaml collection is
+            built lazily when omitted (tests inject a stub).
+        max_hits: cap on the content chunks returned; ``None`` reads
+            retrieval.yaml's ``lookup_max_content_hits``.
+
+    Returns:
+        The unit chunks (reading order within a unit, ``::sum`` last),
+        scores unset. Empty list when nothing is stored for any of the
+        ids.
+    """
+    seen: List[str] = []
+    for source_id in source_ids:
+        chain = str(source_id or "").strip()
+        if chain and chain not in seen:
+            seen.append(chain)
+
+    if not seen:
+        return []
+
+    if max_hits is None:
+        max_hits = _config_max_content_hits()
+
+    if store is None:
+        from src.indexing.chroma_client import ChromaVectorClient
+        from src.tools.config_loader import load_retrieval_config
+
+        key = load_retrieval_config().get(
+            "source_collection_key", "source_chunks"
+        )
+        store = ChromaVectorClient(str(key))
+
+    chunks: List[object] = []
+    for chain in seen:
+        try:
+            found = store.get_unit_chunks(chain, limit=max(1, int(max_hits)))
+        except Exception as exc:  # noqa: BLE001 — enrichment, never a failure
+            logger.warning(
+                "Unit content fetch failed for '%s' (skipped): %s", chain, exc
+            )
+            continue
+        if not found:
+            logger.info(
+                "No stored content for knowledge unit '%s' "
+                "(never-indexed or pruned corpus).",
+                chain,
+            )
+            continue
+        chunks.extend(found)
+        if len(chunks) >= max_hits:
+            break
+
+    return chunks[:max_hits]
+
+
+def _config_max_content_hits() -> int:
+    """``lookup_max_content_hits`` from retrieval.yaml, fail-open."""
+    try:
+        from src.tools.config_loader import load_retrieval_config
+
+        value = int(load_retrieval_config().get(
+            "lookup_max_content_hits", DEFAULT_MAX_CONTENT_HITS
+        ))
+    except Exception as exc:  # noqa: BLE001 — fail-open to the default
+        logger.warning(
+            "Could not read retrieval.yaml for lookup_max_content_hits; "
+            "using default %d: %s", DEFAULT_MAX_CONTENT_HITS, exc,
+        )
+        return DEFAULT_MAX_CONTENT_HITS
+    return value if value > 0 else DEFAULT_MAX_CONTENT_HITS
+
+
 __all__ = [
+    "DEFAULT_MAX_CONTENT_HITS",
     "EntityMatch",
     "characters_dir",
     "close_candidates",
+    "fetch_unit_content",
     "fold_name",
     "known_entity_count",
     "resolve_entity",

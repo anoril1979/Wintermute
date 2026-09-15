@@ -67,6 +67,26 @@ class VectorStoreUnavailableError(VectorStoreError):
 
 
 # ---------------------------------------------------------------------------
+# Reading-order sort key for one unit's chunks
+# ---------------------------------------------------------------------------
+
+#: Depth-first sort key over a unified id chain: segments in chain order,
+#: numeric-aware ('pg:2' < 'pg:10'), the ``::sum`` marker sorted AFTER the
+#: blocks at its own level (content first, its digest last).
+def _unit_chunk_sort_key(chunk: VectorChunk) -> tuple:
+    key: list[tuple[int, int, str]] = []
+    for segment in chunk.id.split("::"):
+        label, _, number = segment.partition(":")
+        if number.isdigit():
+            key.append((0, int(number), label))
+        else:
+            # 'sum' (or any non-numbered segment) sorts after numbered
+            # siblings of the same depth.
+            key.append((1, 0, label))
+    return tuple(key)
+
+
+# ---------------------------------------------------------------------------
 # Config access
 # ---------------------------------------------------------------------------
 
@@ -409,10 +429,115 @@ class ChromaVectorClient:
                 f"for doc_id '{doc_id}': {exc}"
             ) from exc
 
+    # -- Identity-based fetch -----------------------------------------------------
+
+    def get_unit_chunks(self, unit_prefix: str, *, limit: int = 20) -> list[VectorChunk]:
+        """Fetch every stored chunk whose id chains from one content unit.
+
+        The deterministic counterpart of ``query_by_vector``: no similarity
+        here, pure identity. A knowledge source id (``doc:<hex>::chp:1::
+        pg:1::sec:2`` — the provenance the knowledge base stores on every
+        alias) is exactly the id-prefix of that unit's stored chunks: the
+        unit's text blocks (``...::txt:N``) and its summary (``...::sum``),
+        because the unified id scheme (``src/extraction/ids.py``) restarts
+        every counter at its parent. One prefix → the unit's whole stored
+        projection.
+
+        Implementation: one ``get`` filtered on the chunk metadata
+        ``doc_id`` (the chain's head), then a Python ``full_id`` prefix
+        match. Deliberately NOT a Chroma id-list query: the number of
+        block chunks under a unit is not known in advance, and string
+        range filters break on the 9→10 numeric boundary. A document
+        holds hundreds of chunks at most — fetching and filtering them
+        client-side is bounded and exact.
+
+        Args:
+            unit_prefix: the unit's full hierarchical id (``doc:<8hex>::
+                chp:...::sec:N``), as stored in the knowledge base. A bare
+                document id (no ``::`` unit part) is refused: that is an
+                identity, not a unit — use ``count_document``/``delete_document``
+                for whole-document operations.
+            limit: maximum chunks returned (a safety cap; the unit's real
+                content is usually a handful of blocks plus one summary).
+
+        Returns:
+            The unit's chunks in READING order (blocks by numeric id, then
+            the summary last), scores unset (no similarity involved).
+            Empty list for an unknown unit or a never-materialized store.
+
+        Raises:
+            ValueError: a malformed ``unit_prefix`` (no unit part, not a
+                ``doc:<hex>::...`` chain) or a non-positive ``limit``.
+            VectorStoreUnavailableError: the store could not be opened.
+            VectorStoreError: ChromaDB refused the read.
+        """
+        prefix = (unit_prefix or "").strip()
+        doc_id, separator, unit_part = prefix.partition("::")
+        if not separator or not unit_part:
+            raise ValueError(
+                f"get_unit_chunks() requires a full unit chain "
+                f"('doc:<8hex>::chp:1::...'), got {unit_prefix!r} — a bare "
+                "document id is an identity, not a content unit."
+            )
+        if int(limit) <= 0:
+            raise ValueError(f"limit must be a positive int, got {limit!r}.")
+        if not self._store_exists():
+            return []
+
+        collection = self._ensure_collection()
+        try:
+            result = collection.get(
+                where={"doc_id": {"$eq": doc_id}},
+                include=["documents", "metadatas"],
+            )
+        except Exception as exc:
+            raise VectorStoreError(
+                f"ChromaDB get failed on '{self._collection_name}' "
+                f"for unit '{prefix}': {exc}"
+            ) from exc
+
+        chunks: list[VectorChunk] = []
+        for chunk_id, text, metadata in zip(
+            result.get("ids") or [],
+            result.get("documents") or [],
+            result.get("metadatas") or [],
+        ):
+            full_id = str((metadata or {}).get("full_id") or "")
+            if full_id.startswith(prefix + "::"):
+                chunks.append(
+                    VectorChunk(
+                        id=str(chunk_id),
+                        text=str(text or ""),
+                        metadata=dict(metadata or {}),
+                        # No score: identity fetch, no similarity computed.
+                        score=None,
+                    )
+                )
+        # Reading order: blocks by numeric id (txt:2 before txt:10 — plain
+        # string order breaks at two digits), the summary last.
+        chunks.sort(key=_unit_chunk_sort_key)
+        truncated = len(chunks) - int(limit)
+        if truncated > 0:
+            logger.info(
+                "Unit '%s' holds %d chunk(s); returning the first %d "
+                "(reading order)",
+                prefix, len(chunks), int(limit),
+            )
+            chunks = chunks[: int(limit)]
+        if chunks:
+            logger.info(
+                "Fetched %d chunk(s) of unit '%s' from collection '%s'",
+                len(chunks), prefix, self._collection_name,
+            )
+        return chunks
+
     # -- Internals ---------------------------------------------------------------
 
     def _store_exists(self) -> bool:
         """True when a ChromaDB store was already materialized at ``self._path``.
+
+        (Shared by ``count``, ``delete_document``, ``count_document`` and
+        ``get_unit_chunks``: read-only callers must never materialize a store.)
 
         Probes the filesystem (ChromaDB's canonical ``chroma.sqlite3``
         marker) instead of opening a client: merely *opening* a

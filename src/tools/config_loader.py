@@ -1182,6 +1182,19 @@ def validate_retrieval_config(config: object) -> dict:
             "un nom simple de clé, pas un chemin."
         )
 
+    # -- lookup_max_content_hits (optional) ------------------------------------
+    # Cap on the content chunks the knowledge-lookup flow fetches from the
+    # vector store (the deterministic id-based companion): one broad entity
+    # must not flood the answerer's context. Optional — omitted means the
+    # built-in default; a present value must be a strictly positive int.
+    if "lookup_max_content_hits" in config:
+        cap = config["lookup_max_content_hits"]
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+            raise RetrievalConfigError(
+                f"{prefix} : 'lookup_max_content_hits' doit être un entier "
+                f"strictement positif (valeur : {cap!r})."
+            )
+
     # -- query_instruction (optional) ------------------------------------------
     # Query-side instruction for instruction-aware embedding models
     # (qwen3-embedding: "Instruct: ...\nQuery: ..."). Empty string or an

@@ -10,10 +10,17 @@ from. Fully deterministic — no LLM anywhere in this step:
 
 * resolution: direct slug → index scan (full names, then aliases,
   case/accent-insensitive) — the resolver's write-side rules mirrored;
-* found      → ONE synthesized VectorChunk (the identity block: every
-  known name with the content ids where it appears) placed in
-  ``context.outputs["hits"]``, score 1.0 (an exact identity match —
-  the grounding is total);
+* found      → the identity block as ONE synthesized VectorChunk (every
+  known name with the content ids where it appears), score 1.0 (an
+  exact identity match — the grounding is total), then the **vector
+  companion**: each source id is the id-prefix of that unit's stored
+  chunks (blocks + ``::sum`` summary), so the vector store fetches the
+  ACTUAL content those opaque ids point at — deterministic, no
+  similarity. The hits land in ``context.outputs["hits"]``: identity
+  card first (the grounding), then the unit content in the knowledge
+  base's own reading order, capped by retrieval.yaml's
+  ``lookup_max_content_hits`` — the answerer cites both like any
+  semantic hit;
 * not found  → a deterministic, localized "no entity named X" reply
   (with close candidates) placed directly in
   ``context.outputs["answer"]`` — the answer step then skips (the
@@ -36,7 +43,11 @@ from typing import Optional
 from src.agents.contexts import RetrievalContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.indexing.chunks import VectorChunk
-from src.knowledge.entity_lookup import close_candidates, resolve_entity
+from src.knowledge.entity_lookup import (
+    close_candidates,
+    fetch_unit_content,
+    resolve_entity,
+)
 from src.routing.language import entity_unknown_reply, normalize_language
 
 logger = logging.getLogger(__name__)
@@ -48,6 +59,11 @@ ENTITY_KEY = "entity"
 
 #: The synthesized chunk's score: an identity match is exact.
 IDENTITY_SCORE = 1.0
+
+#: Fail-open cap on fetched content chunks when retrieval.yaml cannot be
+#: read (must stay in sync with config/retrieval.yaml and the tool's
+#: own default).
+DEFAULT_MAX_CONTENT_HITS = 8
 
 
 def _identity_chunk_text(match) -> str:
@@ -76,14 +92,23 @@ class KnowledgeLookupAgent:
         *,
         base_dir: Optional[object] = None,
         entity_key: str = ENTITY_KEY,
+        store=None,
+        max_content_hits: Optional[int] = None,
     ) -> None:
         """Args:
         base_dir: knowledge-base override (tests); the config-driven
             folder is used otherwise.
         entity_key: metadata key holding the entity name (wiring seam).
+        store: vector store client for the content companion; the
+            retrieval.yaml collection is built lazily when omitted
+            (tests inject a stub).
+        max_content_hits: cap on fetched content chunks; ``None`` reads
+            retrieval.yaml's ``lookup_max_content_hits``.
         """
         self._base_dir = base_dir
         self._entity_key = entity_key
+        self._store = store
+        self._max_content_hits = max_content_hits
 
     # -- RetrievalGraph step contract -----------------------------------------
 
@@ -141,7 +166,7 @@ class KnowledgeLookupAgent:
             )
 
         context.metadata["resolved_entity"] = match.summary()
-        chunk = VectorChunk(
+        identity = VectorChunk(
             id=f"knowledge::{match.path.stem}",
             text=_identity_chunk_text(match),
             metadata={
@@ -152,13 +177,40 @@ class KnowledgeLookupAgent:
             },
             score=IDENTITY_SCORE,
         )
-        context.outputs["hits"] = [chunk]
+        hits = [identity]
+
+        # -- the vector companion --------------------------------------------
+        # The identity block cites OPAQUE chains ('doc:x::chp:1::pg:1::
+        # sec:2'); the vector store holds the actual content under those
+        # very ids. Fetching by identity — never similarity — gives the
+        # answerer the real passages the entity's names appear in.
+        try:
+            content = fetch_unit_content(
+                match.source_ids,
+                store=self._store,
+                max_hits=self._max_content_hits,
+            )
+        except Exception as exc:  # noqa: BLE001 — enrichment, never a failure
+            logger.warning(
+                "Unit content fetch failed for %r (identity only): %s",
+                match.full_name, exc,
+            )
+            content = []
+        if content:
+            for unit_chunk in content:
+                if unit_chunk.id != identity.id:
+                    hits.append(unit_chunk)
+        context.metadata["content_chunks_fetched"] = max(0, len(hits) - 1)
+
+        context.outputs["hits"] = hits
         context.emit(
             "task", "knowledge_lookup_hit",
             f"entity {match.full_name!r} found ({len(match.names)} known name(s), "
-            f"{len(match.source_ids)} source location(s))",
+            f"{len(match.source_ids)} source location(s), "
+            f"{len(hits) - 1} content chunk(s) fetched from the vector store)",
             entity=match.full_name,
             names=[str(e.get("alias", "")) for e in match.names],
+            content_chunks=len(hits) - 1,
         )
         return AgentResult(
             agent_name=self.name,
