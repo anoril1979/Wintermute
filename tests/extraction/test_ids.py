@@ -27,7 +27,7 @@ from src.extraction.models import (
     TextBlock,
     TocEntry,
 )
-from src.helpers.document_extract_json_store import (
+from src.extraction.json_store import (
     load_extract,
     save_extract,
 )

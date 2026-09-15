@@ -23,7 +23,7 @@ extraction is compared with the stored one:
   the document is summarized again. Never served stale.
 
 Design choices mirror the canonical extraction store
-(src/helpers/document_extract_json_store.py):
+(src/extraction/json_store.py):
 
 * **Full fidelity** — the document body uses the same full-fidelity
   serialization, so the summarized file is a complete ``DocumentExtract``;
@@ -43,7 +43,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from src.helpers.document_extract_json_store import (
+from src.extraction.json_store import (
     document_extract_from_json_dict,
     document_extract_to_json_dict,
 )

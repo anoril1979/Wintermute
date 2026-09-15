@@ -109,7 +109,7 @@ def _default_output_dir() -> Path:
 
     ``extraction_mineru_output_dir`` is the intended key (MinerU owns its
     raw sandbox there; the canonical JSON extracted from it lives in
-    ``extraction_output_dir`` — see src/helpers/document_extract_json_store.py). The
+    ``extraction_output_dir`` — see src/extraction/json_store.py). The
     legacy ``extraction_output_dir`` key is honored as a fallback for
     configurations written before the two-store split. Relative values are
     resolved against the project root; absolute values are used as-is.

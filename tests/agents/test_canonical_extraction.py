@@ -19,7 +19,7 @@ from src.agents.agents.pdf_extraction_agent import (
 )
 from src.agents.contexts import IngestionContext
 from src.extraction.document_extractor import DocumentExtractor
-from src.helpers.document_extract_json_store import load_extract
+from src.extraction.json_store import load_extract
 from src.extraction.mineru_pdf_extractor import MineruPDFExtractor
 from src.extraction.models import DocumentExtract
 from src.tools.extraction_job_file import ExtractionJobFile

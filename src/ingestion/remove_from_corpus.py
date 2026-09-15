@@ -135,7 +135,7 @@ def _remove_json_files(source_path: Optional[Path], stem: str) -> Dict[str, Any]
 
     targets: list[tuple[str, Path]] = []
     try:
-        from src.helpers.document_extract_json_store import canonical_path_for
+        from src.extraction.json_store import canonical_path_for
 
         targets.append(("extraction", canonical_path_for(Path(f"{stem}.pdf"))))
     except Exception as exc:  # noqa: BLE001 — reported, not raised

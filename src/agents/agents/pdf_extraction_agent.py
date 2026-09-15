@@ -8,7 +8,7 @@ resulting ``DocumentExtract`` in ``context.outputs["content_extraction"]``.
 Checkpoint / resume — three stores, consulted in order:
 
 1. the canonical extracted-content JSON (``data/extracted/<stem>.json``,
-   src/helpers/document_extract_json_store.py) — the fixable persistence
+   src/extraction/json_store.py) — the fixable persistence
    layer: when it exists and is valid the extraction resumes from it,
    bypassing MinerU entirely (this is the resume path for user-corrected
    content);
@@ -66,7 +66,7 @@ from src.tools.extraction_job_file import (
     ExtractionJobFile,
 )
 from src.extraction.document_extractor import DocumentExtractor
-from src.helpers.document_extract_json_store import (
+from src.extraction.json_store import (
     ExtractJsonError,
     canonical_path_for,
     load_extract,

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from src.helpers.document_extract_json_store import (
+from src.extraction.json_store import (
     ExtractJsonError,
     canonical_path_for,
     document_extract_from_json_dict,

@@ -10,14 +10,20 @@ Public API:
 
 Related stores moved to their natural homes:
 
-* the canonical extracted-content JSON store lives in ``src.helpers``
-  (``document_extract_json_store`` — a storage helper, not extraction
-  logic);
+* the canonical extracted-content JSON store is ``json_store`` (the
+  extraction layer's persistence face);
 * the LLM-summaries store lives in ``src.summarization``
   (``summarized_store`` — owned by the summarization process).
 """
 
 from src.extraction.document_extractor import DocumentExtractor, PDFExtractor
+from src.extraction.json_store import (
+    ExtractJsonError,
+    canonical_path_for,
+    extraction_output_dir,
+    load_extract,
+    save_extract,
+)
 from src.extraction.mineru_pdf_extractor import (
     MineruPDFExtractor,
     strip_mineru_hyphenation,
@@ -40,6 +46,7 @@ __all__ = [
     "DocumentExtract",
     "DocumentExtractor",
     "DocumentExtractorProtocol",
+    "ExtractJsonError",
     "MineruPDFExtractor",
     "PageContent",
     "PDFExtractor",
@@ -47,6 +54,10 @@ __all__ = [
     "Section",
     "TextBlock",
     "TocEntry",
+    "canonical_path_for",
+    "extraction_output_dir",
+    "load_extract",
+    "save_extract",
     "document_extract_to_dict",
     "strip_mineru_hyphenation",
 ]

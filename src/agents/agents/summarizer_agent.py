@@ -224,37 +224,15 @@ class SummarizerAgent(LLMRoleAgent):
         for chapter_index, chapter in enumerate(document.chapters, 1):
             chapter_summaries: List[Optional[str]] = []
             for page in chapter.pages:
-                for section in page.sections:
-                    section_summaries: List[Optional[str]] = []
-                    for block in section.blocks:
-                        stats["blocks"] += 1
-                        if block.summary:
-                            continue  # already summarized (resume) — keep it
-                        summary = self._summarize_unit(
-                            block.raw_text, label=f"block {block.block_id} (page {page.page_number})",
-                            min_chars=min_chars, max_chars=max_chars,
-                            context=context, stats=stats, warnings=warnings,
-                            copied_key="blocks_copied",
-                        )
-                        if summary is None:
-                            return self._failed_result(context, document, stats, warnings)
-                        block.summary = summary
-                        section_summaries.append(summary)
-                    self._summarize_container(
-                        section, section_summaries,
-                        label=f"chapter {chapter_index} · page {page.page_number} · section {section.section_id}",
-                        min_chars=min_chars, max_chars=max_chars,
-                        context=context, stats=stats, warnings=warnings,
-                        level_key="sections", copied_key="sections_copied",
-                    )
-                stats["pages"] += 1
-                self._summarize_container(
-                    page, self._page_parts(page),
-                    label=f"page {page.page_number}",
+                self._summarize_page(
+                    page,
+                    page_label=f"page {page.page_number}",
+                    section_prefix=f"chapter {chapter_index} · page {page.page_number}",
                     min_chars=min_chars, max_chars=max_chars,
                     context=context, stats=stats, warnings=warnings,
-                    level_key="pages", copied_key="pages_copied",
                 )
+                if stats["failures"]:
+                    return self._failed_result(context, document, stats, warnings)
                 chapter_summaries.append(page.summary)
             stats["chapters"] += 1
             self._summarize_container(
@@ -264,39 +242,21 @@ class SummarizerAgent(LLMRoleAgent):
                 context=context, stats=stats, warnings=warnings,
                 level_key="chapters", copied_key="chapters_copied",
             )
+            if stats["failures"]:
+                return self._failed_result(context, document, stats, warnings)
 
+        # Orphan pages go through the very same page walk — one code path
+        # for both, only the trace labels differ.
         for orphan in document.orphan_pages:
-            for section in orphan.sections:
-                section_summaries: List[Optional[str]] = []
-                for block in section.blocks:
-                    stats["blocks"] += 1
-                    if block.summary:
-                        continue
-                    summary = self._summarize_unit(
-                        block.raw_text, label=f"block {block.block_id} (orphan page {orphan.page_number})",
-                        min_chars=min_chars, max_chars=max_chars,
-                        context=context, stats=stats, warnings=warnings,
-                        copied_key="blocks_copied",
-                    )
-                    if summary is None:
-                        return self._failed_result(context, document, stats, warnings)
-                    block.summary = summary
-                    section_summaries.append(summary)
-                self._summarize_container(
-                    section, section_summaries,
-                    label=f"orphan page {orphan.page_number} · section {section.section_id}",
-                    min_chars=min_chars, max_chars=max_chars,
-                    context=context, stats=stats, warnings=warnings,
-                    level_key="sections", copied_key="sections_copied",
-                )
-            stats["pages"] += 1
-            self._summarize_container(
-                orphan, self._page_parts(orphan),
-                label=f"orphan page {orphan.page_number}",
+            self._summarize_page(
+                orphan,
+                page_label=f"orphan page {orphan.page_number}",
+                section_prefix=f"orphan page {orphan.page_number}",
                 min_chars=min_chars, max_chars=max_chars,
                 context=context, stats=stats, warnings=warnings,
-                level_key="pages", copied_key="pages_copied",
             )
+            if stats["failures"]:
+                return self._failed_result(context, document, stats, warnings)
 
         # Document level: the chapters' summaries (orphans included).
         doc_parts = self._document_parts(document)
@@ -352,46 +312,35 @@ class SummarizerAgent(LLMRoleAgent):
         )
 
     def validate(self, context: IngestionContext) -> Optional[AgentResult]:
-        """Every unit must carry a non-empty summary after a successful run."""
+        """Every unit holding content must carry a summary after the run.
+
+        One pass over the same walk the loop used: a unit "owes" a summary
+        when it holds text below it (blank units are legitimately skipped);
+        a blank summary on an owing unit is the only failure shape.
+        """
         document: Optional[DocumentExtract] = context.outputs.get(INPUT_KEY)
         if document is None:
             return None
 
         missing: List[str] = []
         for chapter in document.chapters:
-            chapter_owes = False
             for page in chapter.pages:
-                page_owes = False
                 for section in page.sections:
-                    # Content flows bottom-up: a unit owes a summary only
-                    # when it actually holds text below it (blank units are
-                    # legitimately skipped without one).
-                    section_owes = False
                     for block in section.blocks:
                         if block.raw_text.strip() and _blank(block.summary):
                             missing.append(
-                                f"block {block.block_id} (page {page.page_number})"
-                            )
-                        section_owes = section_owes or bool(block.raw_text.strip())
-                    if section_owes and _blank(section.summary):
+                                f"block {block.block_id} (page {page.page_number})")
+                    if section.raw_text.strip() and _blank(section.summary):
                         missing.append(
-                            f"section {section.section_id} (page {page.page_number})"
-                        )
-                    page_owes = page_owes or section_owes
-                if page_owes and _blank(page.summary):
+                            f"section {section.section_id} (page {page.page_number})")
+                if page.raw_text.strip() and _blank(page.summary):
                     missing.append(f"page {page.page_number}")
-                chapter_owes = chapter_owes or page_owes
-            if chapter_owes and _blank(chapter.summary):
+            if (chapter.full_text or "").strip() and _blank(chapter.summary):
                 missing.append(f"chapter {chapter.start_page}")
-        doc_owes = bool(document.chapters)
         for orphan in document.orphan_pages:
-            orphan_owes = any(
-                any(b.raw_text.strip() for b in s.blocks) for s in orphan.sections
-            )
-            if orphan_owes and _blank(orphan.summary):
+            if orphan.raw_text.strip() and _blank(orphan.summary):
                 missing.append(f"orphan page {orphan.page_number}")
-            doc_owes = doc_owes or orphan_owes
-        if doc_owes and _blank(document.summary):
+        if document.chapters and _blank(document.summary):
             missing.append("document")
 
         if missing:
@@ -422,6 +371,11 @@ class SummarizerAgent(LLMRoleAgent):
                 yield from section.blocks
                 yield section
             yield orphan
+
+    # NOTE: no pre-hashing of summaries is needed before fingerprinting —
+    # ``content_fingerprint`` (summarized_store) already excludes the
+    # ``summary``/``id``/``origin`` keys recursively, so a partially-
+    # summarized document (graph retry) hashes exactly like a clean one.
 
     def _resume_from_summarized(
         self, context: IngestionContext, document: DocumentExtract
@@ -482,7 +436,7 @@ class SummarizerAgent(LLMRoleAgent):
             logger.warning("Unusable summarized extraction for '%s': %s", name, exc)
             return None
 
-        current_fingerprint = self._pre_summarization_fingerprint(document)
+        current_fingerprint = content_fingerprint(document)
         if fingerprint != current_fingerprint:
             context.emit("task", "summarized_stale",
                          f"summarized content does not match the current "
@@ -547,25 +501,11 @@ class SummarizerAgent(LLMRoleAgent):
     def _pre_summarization_fingerprint(document: DocumentExtract) -> str:
         """Content fingerprint of the document as it enters the step.
 
-        The resume check compares fingerprints of *content*, so any
-        summaries carried by the incoming document (none in the normal
-        flow, or partial ones after a graph retry) are stripped before
-        hashing — only the pre-summarization state counts.
+        Kept as a thin alias of the store's fingerprint for the tests'
+        benefit: the stripping of summaries/ids/origin happens inside
+        ``content_fingerprint`` itself.
         """
-        stripped_units = list(SummarizerAgent._iter_units(document))
-        saved = [unit.summary for unit in stripped_units]
-        try:
-            for unit in stripped_units:
-                unit.summary = None
-            if document.summary is not None:
-                saved.append(document.summary)
-                document.summary = None
-            return content_fingerprint(document)
-        finally:
-            for unit, previous in zip(stripped_units, saved):
-                unit.summary = previous
-            if len(saved) > len(stripped_units):
-                document.summary = saved[len(stripped_units)]
+        return content_fingerprint(document)
 
     def _persist_summarized(
         self, context: IngestionContext, document: DocumentExtract
@@ -715,6 +655,58 @@ class SummarizerAgent(LLMRoleAgent):
             # a failed result right after seeing it in the stats.
             return
         unit.summary = summary
+
+    def _summarize_page(
+        self,
+        page: PageContent,
+        *,
+        page_label: str,
+        section_prefix: str,
+        min_chars: int,
+        max_chars: int,
+        context: IngestionContext,
+        stats: Dict[str, int],
+        warnings: List[str],
+    ) -> None:
+        """Summarize one page: blocks, then sections, then the page itself.
+
+        One walk for in-chapter and orphan pages alike — only the trace
+        labels differ (``page_label`` / ``section_prefix``). A failure is
+        visible in ``stats["failures"]``; the caller turns it into the
+        step failure (units already summarized stay summarized).
+        """
+        for section in page.sections:
+            section_summaries: List[Optional[str]] = []
+            for block in section.blocks:
+                stats["blocks"] += 1
+                if block.summary:
+                    continue  # already summarized (resume) — keep it
+                summary = self._summarize_unit(
+                    block.raw_text,
+                    label=f"block {block.block_id} ({page_label})",
+                    min_chars=min_chars, max_chars=max_chars,
+                    context=context, stats=stats, warnings=warnings,
+                    copied_key="blocks_copied",
+                )
+                if summary is None:
+                    return
+                block.summary = summary
+                section_summaries.append(summary)
+            self._summarize_container(
+                section, section_summaries,
+                label=f"{section_prefix} · section {section.section_id}",
+                min_chars=min_chars, max_chars=max_chars,
+                context=context, stats=stats, warnings=warnings,
+                level_key="sections", copied_key="sections_copied",
+            )
+        stats["pages"] += 1
+        self._summarize_container(
+            page, self._page_parts(page),
+            label=page_label,
+            min_chars=min_chars, max_chars=max_chars,
+            context=context, stats=stats, warnings=warnings,
+            level_key="pages", copied_key="pages_copied",
+        )
 
     def _page_parts(self, page: PageContent) -> List[Optional[str]]:
         return [section.summary for section in page.sections]

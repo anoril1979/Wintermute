@@ -1,8 +1,9 @@
 """Canonical extracted-content store — the fixable JSON persistence layer.
 
-Home: ``src/helpers`` — a generic, dependency-light utility (models + config
-loader only) used by the extraction layer and reusable elsewhere; it is not
-extraction-specific logic itself.
+Home: ``src.extraction`` — the store is the extraction layer's persistence
+face (models + config loader only, no extraction logic): the pipeline's
+consumers import it from the extraction package like every other piece of
+the layer.
 
 When a document is extracted, its full ``DocumentExtract`` is serialized as
 JSON under ``extraction_output_dir`` (config/ingestion.yaml, default
