@@ -41,6 +41,9 @@ class RetrievalSpec(_StrictModel):
                     what is embedded and matched against the corpus. The
                     analyzer produced it (pronouns already resolved); no
                     downstream LLM rephrases it.
+        entity:     ``lookup`` kind only — the entity name the user asks
+                    about (user spelling), resolved against the markdown
+                    knowledge base.
         document:   optional bare document name the question is scoped to.
         chapter_title: optional chapter title the question is scoped to.
         top_k:      per-request result count; None = config default. The
@@ -50,6 +53,7 @@ class RetrievalSpec(_StrictModel):
 
     kind: RetrievalLookupKind = RetrievalLookupKind.SEMANTIC
     question: str = Field(min_length=1)
+    entity: Optional[str] = None
     document: Optional[str] = None
     chapter_title: Optional[str] = None
     top_k: Optional[int] = Field(default=None, ge=1, le=100)
@@ -68,6 +72,7 @@ class RetrievalSpec(_StrictModel):
         return cls(
             kind=request.lookup_kind,
             question=request.question,
+            entity=request.entity,
             document=request.document,
             chapter_title=request.chapter_title,
             top_k=request.top_k,
@@ -81,6 +86,7 @@ class RetrievalSpec(_StrictModel):
         return {
             "kind": self.kind.value,
             "question": self.question,
+            "entity": self.entity,
             "document": self.document,
             "chapter_title": self.chapter_title,
             "top_k": self.top_k,

@@ -1,18 +1,18 @@
 """Retrieval graph: run the retrieval steps for one classified question.
 
-Mirror of the ingestion graph, read side. Today two real steps for a
-``semantic`` request:
+Mirror of the ingestion graph, read side. Two request kinds are served:
 
-    semantic_search  -> "semantic_retriever" (SemanticRetrievalAgent)
-    answer           -> "answerer"           (AnswerAgent)
+    semantic  ->  semantic_search  -> "semantic_retriever" (SemanticRetrievalAgent)
+    lookup    ->  knowledge_lookup -> "knowledge_lookup"    (KnowledgeLookupAgent)
+    (both)    ->  answer           -> "answerer"           (AnswerAgent)
 
 The routing analyzer (upstream) already classified the lookup and the
 decision table assembled the filters; the graph hands the context to the
 steps matching the request type — the search fetches the scored hits,
 the answer agent phrases them into the user-facing reply (grounded in
 the hits only, prompt-enforced). Request types without serving agents
-(index, relation, summary, listing) are reported not-implemented —
-never silently degraded to a semantic search.
+(``relationship`` — the SQL claims layer, later) are reported
+not-implemented — never silently degraded to a semantic search.
 
 Failure policy mirrors the ingestion graph: a step failing with a
 non-retryable domain ends the run with that step's result; retryable
@@ -40,12 +40,16 @@ DEFAULT_MAX_RETRIES = 1
 #: phrases the fetched hits into the user-facing reply.
 STEPS = {
     "semantic_search": "semantic_retriever",
+    "knowledge_lookup": "knowledge_lookup",
     "answer": "answerer",
 }
 
 #: Extra step the graph appends after the kind's lookup step succeeded:
-#: the hits of these kinds are phrased into a user-facing answer.
-ANSWER_AFTER = {"semantic_search"}
+#: the hits of these kinds are phrased into a user-facing answer. The
+#: lookup's MISS also ends with a ready answer (the agent wrote it) —
+#: the answer step then does nothing (its no-hits path sees the answer
+#: already present via the payload contract below).
+ANSWER_AFTER = {"semantic_search", "knowledge_lookup"}
 
 
 @dataclass
@@ -199,6 +203,8 @@ class RetrievalGraph:
         """The lookup step serving a request type (None = not implemented)."""
         if kind == RetrievalLookupKind.SEMANTIC.value:
             return "semantic_search"
+        if kind == RetrievalLookupKind.LOOKUP.value:
+            return "knowledge_lookup"
         return None
 
     def _run_step(

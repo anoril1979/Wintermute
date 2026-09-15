@@ -238,6 +238,10 @@ def _solve_request(
             "language": language,
         }
     )
+    if spec.entity:
+        # ``lookup`` kind: the entity name (user spelling) the knowledge
+        # lookup resolves against the markdown base.
+        context.metadata["entity"] = spec.entity
 
     outcome = graph.run(context, kind=spec.kind.value)
 
@@ -283,14 +287,17 @@ def _solve_request(
     ]
     # The answer step (when registered) phrases the hits into the final
     # user-facing reply; the search results stay carried alongside so a
-    # phrasing failure never voids them.
+    # phrasing failure never voids them. A deterministic answer written
+    # upstream (knowledge lookup miss: "no such entity") also lands here.
     answer = context.outputs.get("answer") or ""
+    resolved = context.metadata.get("resolved_entity")
     _emit(
         "request_done",
         "%s%d chunk(s) retrieved" % (prefix, len(hit_dicts))
         + (" and answered" if answer else ""),
         hits=len(hit_dicts),
         answered=bool(answer),
+        entity=(resolved or {}).get("full_name") if isinstance(resolved, dict) else None,
     )
     return {
         "status": STATUS_OK,

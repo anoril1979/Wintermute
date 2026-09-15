@@ -23,8 +23,9 @@ in — plus the two request lists:
   "language": "fr",
   "retrieval": [
     {
-      "lookup_kind": "semantic|index|relation|summary|listing",
+      "lookup_kind": "semantic|lookup|relationship",
       "question": "self-contained search query in the user's language",
+      "entity": null,
       "document": null,
       "chapter_title": null,
       "top_k": null,
@@ -82,16 +83,37 @@ word the user wrote.
   corpus ("what do the sources say about...", "qui est...", "dans quel
   chapitre..."). Fields:
   - `lookup_kind` — exactly one of:
-    - `semantic`: open question about content, events, descriptions,
-      atmosphere — anything answered by reading passages.
-    - `index`: counting/aggregation over entities ("how many characters
-      are blind?").
-    - `relation`: a stated relationship between named entities ("who is
-      married to Jennifer?", "family tree of X", "who held the sword?").
-    - `summary`: a summary/overview of a document or chapter ("summarize
-      the gazette").
-    - `listing`: what is in the library ("which documents are ingested?").
-    When several kinds fit, prefer `semantic`.
+    - `lookup`: the user asks about a **specific, identifiable entity** —
+      a character, object, place, document, chapter — and the answer can
+      primarily be obtained by retrieving that entity directly. Typical
+      forms: "Who is Marcus?", "Tell me about Marcus.", "What do we know
+      about the city of Aras?", "Give me the information about the sword
+      Blackfang.", "Show me Marcus's character sheet.". For a `lookup`,
+      also set `entity` to the entity's name **exactly as the user wrote
+      it** (no invention, no translation, no extension — "épée de
+      vif-argent", "Marcus"). "Who is Marcus?" is a lookup, NOT a
+      semantic search for "who", "is" and "Marcus". "Tell me everything
+      about Marcus" is normally a lookup.
+    - `relationship`: a stated **relationship between entities**, ideally
+      expressible with a controlled predicate ("Who is Marcus's wife?",
+      "Who are Marcus's children?", "Where does Marcus live?", "Which
+      characters are enemies of Marcus?", "What objects does Marcus
+      own?"). "Who is Marcus's wife?" is a relationship, NOT a lookup of
+      Marcus followed by a semantic search. Never set `entity`.
+    - `semantic`: meaning, explanation, interpretation, themes, context,
+      evidence — anything that cannot reliably be answered by retrieving
+      a single entity or querying a specific structured relationship:
+      "Why did Marcus leave the city?", "What does Marcus think about the
+      King?", "What are the main themes of chapter 15?", "Find passages
+      describing Marcus's fear.", "Quels sont les problèmes de Rorg
+      Yanhalas ?". "When does Marcus meet Marie and why is their meeting
+      important?" is ONE semantic request (contextual interpretation),
+      not a split. A semantic question + a relationship question about
+      the same entity are TWO requests. Never set `entity`.
+    When several kinds could fit, prefer `lookup` for an identifiable
+    entity, then `semantic` for open content.
+  - `entity`: `lookup` only — the entity name as the user spelled it;
+      `null` for the other kinds.
   - `question`: the search query, self-contained — resolve pronouns and
     ellipses against the WHOLE prompt ("Tell me more about him, especially
     his family tree" → "everything about the King of the North" +
@@ -130,7 +152,15 @@ Input: `"Ingest Dumas.pdf, then who marries Edmond?"`
 (the ingestion ask cannot be honored from the chat; the question is routed)
 
 Input: `"Who is the King of the North? Tell me more about him, especially his family tree."`
-→ `{"language": "en", "retrieval": [{"lookup_kind": "semantic", "question": "Who is the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "identity question", "utterance": "Who is the King of the North?"}, {"lookup_kind": "semantic", "question": "everything about the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "open content question on the same entity", "utterance": "Tell me more about him"}, {"lookup_kind": "relation", "question": "family tree of the King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "kinship relations of a named entity", "utterance": "especially his family tree"}], "general": []}`
+→ `{"language": "en", "retrieval": [{"lookup_kind": "lookup", "question": "Who is the King of the North", "entity": "King of the North", "document": null, "chapter_title": null, "top_k": null, "reason": "identity question on a named entity", "utterance": "Who is the King of the North?"}, {"lookup_kind": "relationship", "question": "family tree of the King of the North", "entity": null, "document": null, "chapter_title": null, "top_k": null, "reason": "kinship relations of a named entity", "utterance": "especially his family tree"}], "general": []}`
+(the identity ask retrieves the entity directly; the kinship ask needs the relations layer)
+
+Input: `"Que sais-tu de Rorg Yanhalas ?"`
+→ `{"language": "fr", "retrieval": [{"lookup_kind": "lookup", "question": "tout ce que l'on sait de Rorg Yanhalas", "entity": "Rorg Yanhalas", "document": null, "chapter_title": null, "top_k": null, "reason": "fiche d'identité d'une entité nommée", "utterance": "Que sais-tu de Rorg Yanhalas ?"}], "general": []}`
+
+Input: `"Quels sont les problèmes de Rorg Yanhalas ?"`
+→ `{"language": "fr", "retrieval": [{"lookup_kind": "semantic", "question": "les problèmes de Rorg Yanhalas", "entity": null, "document": null, "chapter_title": null, "top_k": null, "reason": "interprétation du contenu, pas une fiche d'identité", "utterance": "Quels sont les problèmes de Rorg Yanhalas ?"}], "general": []}`
+(a WHY-style question needs passage reading, not the entity card)
 
 Input: `"I would like you to ingest some documents, then provide me with the summary of it. Is it possible?"`
 → `{"language": "en", "retrieval": [], "general": [{"question": "I would like you to ingest some documents, then provide me with the summary of it. Is it possible?", "utterance": "I would like you to ingest some documents, then provide me with the summary of it. Is it possible?"}]}`
@@ -142,8 +172,8 @@ Input: `""`
 → `{"language": "en", "retrieval": [], "general": []}`
 
 Input: `"OK, bien. Dis-moi ce que tu sais d'une épée de vif-argent ?"`
-→ `{"language": "fr", "retrieval": [{"lookup_kind": "semantic", "question": "que sait-on sur l'épée de vif-argent", "document": null, "chapter_title": null, "top_k": null, "reason": "question de contenu sur un objet du monde", "utterance": "Dis-moi ce que tu sais d'une épée de vif-argent ?"}], "general": []}`
-(the question mentions an item of the world, not a file)
+→ `{"language": "fr", "retrieval": [{"lookup_kind": "lookup", "question": "tout ce que l'on sait sur l'épée de vif-argent", "entity": "épée de vif-argent", "document": null, "chapter_title": null, "top_k": null, "reason": "fiche d'identité d'un objet du monde", "utterance": "Dis-moi ce que tu sais d'une épée de vif-argent ?"}], "general": []}`
+(the question mentions an item of the world, not a file; the entity keeps the user's spelling)
 
 Input: `"Charge gazette.pdf s'il te plaît, c'est un doc officiel."`
 → `{"language": "fr", "retrieval": [], "general": [{"question": "Charge gazette.pdf s'il te plaît, c'est un doc officiel.", "utterance": "Charge gazette.pdf s'il te plaît, c'est un doc officiel."}]}`

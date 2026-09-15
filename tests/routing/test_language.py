@@ -19,6 +19,7 @@ from src.indexing.chunks import VectorChunk
 from src.routing.language import (
     DEFAULT_LANGUAGE,
     dormant_corpus_reply,
+    entity_unknown_reply,
     nothing_found_reply,
     normalize_language,
     unserved_kind_reply,
@@ -76,11 +77,32 @@ class LocalizedFallbacksTest(unittest.TestCase):
         self.assertIn("dormant", dormant_corpus_reply("en"))
 
     def test_unserved_kind_interpolates_and_localizes(self):
-        fr = unserved_kind_reply("relation", "fr")
-        self.assertIn("relation", fr)
+        fr = unserved_kind_reply("relationship", "fr")
+        self.assertIn("relationship", fr)
         self.assertTrue(fr.startswith("Ce type"))
-        en = unserved_kind_reply("relation", "en")
+        en = unserved_kind_reply("relationship", "en")
         self.assertIn("not served yet", en)
+
+    def test_entity_unknown_interpolates_and_localizes(self):
+        fr = entity_unknown_reply("Rorg", "fr")
+        self.assertIn("Rorg", fr)
+        self.assertTrue(fr.startswith("Aucune entité"))
+        en = entity_unknown_reply("Rorg", "en")
+        self.assertIn("No entity named 'Rorg'", en)
+
+    def test_entity_unknown_lists_candidates_when_given(self):
+        reply = entity_unknown_reply("le", "en", ["Joe le Clodo",
+                                                   "Bobby le Frelon"])
+        self.assertIn("Did you mean one of these?", reply)
+        self.assertIn("+ Joe le Clodo", reply)
+        self.assertIn("+ Bobby le Frelon", reply)
+        # Localized candidates line.
+        fr = entity_unknown_reply("le", "fr", ["Joe le Clodo"])
+        self.assertIn("Vouliez-vous dire", fr)
+
+    def test_entity_unknown_without_candidates_has_no_list(self):
+        reply = entity_unknown_reply("Rorg", "en", [])
+        self.assertNotIn("Did you mean", reply)
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from src.agents.agents.answer_agent import AnswerAgent
 from src.agents.agents.character_extraction_agent import CharacterExtractionAgent
 from src.agents.agents.entity_resolver_agent import CharacterResolver
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
+from src.agents.agents.knowledge_lookup_agent import KnowledgeLookupAgent
 from src.agents.agents.knowledge_validation_agent import KnowledgeValidatorAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
 from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
@@ -52,5 +53,8 @@ def build_retrieval_agents() -> Dict[str, object]:
     """
     return {
         "semantic_retriever": SemanticRetrievalAgent(),
+        # ``lookup`` kind: entity resolution against the markdown base
+        # (deterministic, no LLM).
+        "knowledge_lookup": KnowledgeLookupAgent(),
         "answerer": AnswerAgent(allow_missing_role=True),
     }

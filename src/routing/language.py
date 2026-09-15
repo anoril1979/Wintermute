@@ -33,7 +33,7 @@ prompt asks for a two-letter code, which keeps this path boring.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +167,8 @@ def dormant_corpus_reply(language: Optional[str]) -> str:
 def unserved_kind_reply(kind: str, language: Optional[str]) -> str:
     """The deterministic 'lookup kind not served yet' reply, localized.
 
-    ``kind`` is the retrieval lookup kind (``index``, ``relation``,
-    ``summary``, ``listing``...) interpolated into the sentence.
+    ``kind`` is the retrieval lookup kind (``relationship``...) interpolated
+    into the sentence.
     """
     code = normalize_language(language)
     templates = {
@@ -195,3 +195,52 @@ def unserved_kind_reply(kind: str, language: Optional[str]) -> str:
     }
     template = templates.get(code) or templates[DEFAULT_LANGUAGE]
     return template.format(kind=kind)
+
+
+_ENTITY_UNKNOWN: Dict[str, str] = {
+    "en": (
+        "No entity named '{entity}' exists in my knowledge base."
+    ),
+    "fr": (
+        "Aucune entité nommée « {entity} » n'existe dans ma base de "
+        "connaissances."
+    ),
+    "de": (
+        "Kein Objekt namens '{entity}' existiert in meiner Wissensbasis."
+    ),
+    "es": (
+        "Ninguna entidad llamada '{entity}' existe en mi base de "
+        "conocimientos."
+    ),
+    "it": (
+        "Nessuna entità chiamata '{entity}' esiste nella mia base di "
+        "conoscenze."
+    ),
+}
+
+_ENTITY_CANDIDATES: Dict[str, str] = {
+    "en": "Did you mean one of these?",
+    "fr": "Vouliez-vous dire l'un de ceux-ci ?",
+    "de": "Meinten Sie einen dieser?",
+    "es": "¿Querías decir alguno de estos?",
+    "it": "Intendevi uno di questi?",
+}
+
+
+def entity_unknown_reply(
+    entity: str, language: Optional[str], candidates: Optional[List[str]] = None
+) -> str:
+    """The deterministic 'entity not in the knowledge base' reply, localized.
+
+    ``candidates`` (close names found in the base, best first) are appended
+    as a bulleted list when non-empty — the caller decided what counts as
+    close; this only renders the reply.
+    """
+    code = normalize_language(language)
+    lines = [_ENTITY_UNKNOWN.get(code) or _ENTITY_UNKNOWN[DEFAULT_LANGUAGE]]
+    lines[0] = lines[0].format(entity=entity)
+    if candidates:
+        lines.append(_ENTITY_CANDIDATES.get(code)
+                     or _ENTITY_CANDIDATES[DEFAULT_LANGUAGE])
+        lines.extend(f"+ {name}" for name in candidates)
+    return "\n".join(lines)

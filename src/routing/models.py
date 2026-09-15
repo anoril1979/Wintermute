@@ -6,9 +6,9 @@ request it holds, grouped by scope. The output shape is::
 
     {
       "retrieval": [
-        {"lookup_kind": "semantic|index|relation|summary|listing",
-         "question": "...", "document": null, "chapter_title": null,
-         "top_k": null}
+        {"lookup_kind": "semantic|lookup|relationship",
+         "question": "...", "entity": null, "document": null,
+         "chapter_title": null, "top_k": null}
       ],
       "general": [
         {"question": "..."}
@@ -73,13 +73,25 @@ class RequestScope(str, Enum):
 
 
 class RetrievalLookupKind(str, Enum):
-    """What kind of lookup a retrieval request calls for (mirrors the storages)."""
+    """How the knowledge system retrieves the information a question needs
+    (the storage layer behind each kind).
 
-    SEMANTIC = "semantic"      # vector search over source chunks — ready
-    INDEX = "index"            # counting/aggregation — SQL layer (later)
-    RELATION = "relation"      # claims traversal — SQL layer (later)
-    SUMMARY = "summary"        # document/section summaries — summarized store (later)
-    LISTING = "listing"        # what is ingested — canonical store (later)
+    The taxonomy is the query-intent classification of the analyzer:
+
+    * ``semantic``     — meaning, explanation, interpretation, passages:
+      answered by reading the corpus through the vector index (ready).
+    * ``lookup``       — a specific, identifiable entity ("who is Marcus?",
+      "tell me about the sword Blackfang"): answered by retrieving that
+      entity's knowledge file directly (knowledge lookup, ready — the
+      markdown identity base; SQL/structured layers later).
+    * ``relationship`` — a stated relationship BETWEEN entities ("who is
+      Marcus's wife?"): answered by traversing the claims/relations
+      storage (SQL layer, later — carried and reported not-implemented).
+    """
+
+    SEMANTIC = "semantic"          # vector search over source chunks — ready
+    LOOKUP = "lookup"              # entity lookup in the knowledge base — ready
+    RELATIONSHIP = "relationship"  # relations traversal — SQL layer (later)
 
 
 class _StrictModel(BaseModel):
@@ -111,16 +123,32 @@ class RetrievalRequest(_StrictModel):
     rephrase it). ``lookup_kind`` maps onto the storage layers; kinds the
     retrieval pipeline cannot serve yet are reported ``not_implemented``
     instead of being misread as semantic searches.
+
+    ``entity`` is the ``lookup`` kind's target: the name of the entity the
+    user asks about, spelled as the user wrote it ("Marcus", "épée de
+    vif-argent"). The knowledge lookup resolves it against the markdown
+    base (exact slug, index aliases, then contained-in-name candidates);
+    an unresolved entity is a graceful "not in my memory" answer listing
+    the close candidates. ``None`` for the other kinds.
     """
 
     question: str = Field(min_length=1)
     lookup_kind: RetrievalLookupKind = RetrievalLookupKind.SEMANTIC
+    entity: Optional[str] = None
     document: Optional[str] = None
     chapter_title: Optional[str] = None
     top_k: Optional[int] = Field(default=None, ge=1, le=100)
     reason: str = ""
     utterance: str = ""
     preceding: List[RequestContextEntry] = Field(default_factory=list)
+
+    @field_validator("entity")
+    @classmethod
+    def _entity_clean(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     @field_validator("question")
     @classmethod
@@ -153,6 +181,7 @@ class RetrievalRequest(_StrictModel):
         return {
             "lookup_kind": self.lookup_kind.value,
             "question": self.question,
+            "entity": self.entity,
             "document": self.document,
             "chapter_title": self.chapter_title,
             "top_k": self.top_k,

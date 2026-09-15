@@ -244,19 +244,21 @@ class RetrievalSpecModelTest(unittest.TestCase):
     def test_batch_from_requests_preserves_order(self):
         requests = [
             RetrievalRequest(question="who is the King",
-                             lookup_kind="semantic"),
+                             lookup_kind="lookup", entity="King of the North"),
             RetrievalRequest(question="family tree of the King",
-                             lookup_kind="relation"),
+                             lookup_kind="relationship"),
         ]
         batch = RetrievalBatch.from_requests(requests)
         self.assertEqual(
             [s.kind for s in batch.specs],
-            [RetrievalLookupKind.SEMANTIC, RetrievalLookupKind.RELATION],
+            [RetrievalLookupKind.LOOKUP, RetrievalLookupKind.RELATIONSHIP],
         )
+        self.assertEqual(batch.specs[0].entity, "King of the North")
 
     def test_summary_shows_the_kind(self):
-        spec = RetrievalSpec(question="x", kind="relation")
-        self.assertEqual(spec.summary()["kind"], "relation")
+        spec = RetrievalSpec(question="x", kind="lookup", entity="Joe")
+        self.assertEqual(spec.summary()["kind"], "lookup")
+        self.assertEqual(spec.summary()["entity"], "Joe")
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +297,7 @@ class DecisionTableTest(unittest.TestCase):
         self.assertEqual(decision.status, ROUTER_NO_CORPUS)
 
     def test_unimplemented_kinds_stay_routed(self):
-        for kind in ("index", "relation", "summary", "listing"):
+        for kind in ("relationship",):
             decision = apply_decision_table(
                 RetrievalFacts(chunk_count=3),
                 RetrievalSpec(kind=kind, question="x"),
@@ -303,7 +305,19 @@ class DecisionTableTest(unittest.TestCase):
             )
             self.assertEqual(decision.status, ROUTER_PROCEED)
             self.assertFalse(decision.implemented, kind)
-        self.assertEqual(IMPLEMENTED_KINDS, {"semantic"})
+        self.assertEqual(IMPLEMENTED_KINDS, {"semantic", "lookup"})
+
+    def test_lookup_is_exempt_from_the_corpus_gate(self):
+        """A lookup reads the knowledge base, not the vectors: an empty
+        vector store must not answer "memory dormant" to it."""
+        decision = apply_decision_table(
+            RetrievalFacts(store_exists=False, chunk_count=0),
+            RetrievalSpec(kind="lookup", question="who is Marcus",
+                          entity="Marcus"),
+            config=self.CONFIG,
+        )
+        self.assertEqual(decision.status, ROUTER_PROCEED)
+        self.assertTrue(decision.implemented)
 
 
 class GatherFactsTest(unittest.TestCase):
@@ -686,7 +700,7 @@ class RetrievalOrchestratorTest(unittest.TestCase):
         result = self._run(
             RetrievalRequest(
                 question="who is married to Jennifer?",
-                lookup_kind="relation", reason="relation",
+                lookup_kind="relationship", reason="relation",
             ),
         )
         self.assertEqual(result["status"], "not_implemented")
@@ -838,8 +852,20 @@ class BatchOrchestratorTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.store = _fill_store(self.tmp)
         self.embedder = StubEmbedder()
+        # A tiny knowledge base so the lookup agent stays hermetic.
+        self.kb = Path(tempfile.mkdtemp(prefix="wm_retbatch_kb_"))
+        self.addCleanup(shutil.rmtree, self.kb, ignore_errors=True)
+        from src.knowledge.character_markdown_store import write_character
+
+        write_character(
+            "King of the North",
+            [{"alias": "King of the North",
+              "source_ids": ["doc:x::chp:1::pg:1::sec:1"]}],
+            self.kb / "characters" / "king-of-the-north.md",
+        )
 
     def _graph(self):
+        from src.agents.agents.knowledge_lookup_agent import KnowledgeLookupAgent
         from src.agents.agents.semantic_retrieval_agent import (
             SemanticRetrievalAgent,
         )
@@ -848,19 +874,19 @@ class BatchOrchestratorTest(unittest.TestCase):
         return RetrievalGraph(agents={
             "semantic_retriever": SemanticRetrievalAgent(
                 embedder=self.embedder, store=self.store, instruction=""),
+            "knowledge_lookup": KnowledgeLookupAgent(base_dir=self.kb),
         })
 
     def test_king_of_the_north_compound_prompt(self):
-        """The user's example: two semantic + one relation request."""
+        """The user's example: lookup + relationship request."""
         from src.retrieval.retrieval_orchestrator import run_retrieval
 
         requests = [
             RetrievalRequest(question="who is the King of the North",
-                             lookup_kind="semantic", reason="identity"),
-            RetrievalRequest(question="everything about the King of the North",
-                             lookup_kind="semantic", reason="content"),
+                             lookup_kind="lookup", entity="King of the North",
+                             reason="identity"),
             RetrievalRequest(question="family tree of the King of the North",
-                             lookup_kind="relation", reason="kinship"),
+                             lookup_kind="relationship", reason="kinship"),
         ]
         with unittest.mock.patch(
             "src.retrieval.retrieval_orchestrator.gather_facts",
@@ -868,10 +894,10 @@ class BatchOrchestratorTest(unittest.TestCase):
         ):
             result = run_retrieval(requests, graph=self._graph())
         self.assertEqual(result["status"], "partial",
-                         "2 semantic served, relation not implemented yet")
-        self.assertEqual(len(result["requests"]), 3)
+                         "lookup served, relationship not implemented yet")
+        self.assertEqual(len(result["requests"]), 2)
         statuses = [sub["status"] for sub in result["requests"]]
-        self.assertEqual(statuses, ["ok", "ok", "not_implemented"])
+        self.assertEqual(statuses, ["ok", "not_implemented"])
         # Flat hits carry every served request's chunks.
         self.assertTrue(result["hits"])
         self.assertEqual(
@@ -905,7 +931,7 @@ class BatchOrchestratorTest(unittest.TestCase):
 
         requests = [
             RetrievalRequest(question="the king fled", lookup_kind="semantic"),
-            RetrievalRequest(question="family tree", lookup_kind="relation"),
+            RetrievalRequest(question="family tree", lookup_kind="relationship"),
         ]
         with unittest.mock.patch(
             "src.retrieval.retrieval_orchestrator.gather_facts",

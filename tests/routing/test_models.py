@@ -130,9 +130,17 @@ class RetrievalRequestValidationTest(unittest.TestCase):
             RetrievalRequest(question="   ")
 
     def test_lookup_kinds(self):
-        for kind in ("semantic", "index", "relation", "summary", "listing"):
+        for kind in ("semantic", "lookup", "relationship"):
             request = RetrievalRequest(question="q", lookup_kind=kind)
             self.assertEqual(request.lookup_kind.value, kind)
+
+    def test_lookup_kind_carries_the_entity(self):
+        request = RetrievalRequest(
+            question="who is Marcus", lookup_kind="lookup", entity="Marcus"
+        )
+        self.assertEqual(request.entity, "Marcus")
+        blank = RetrievalRequest(question="q", lookup_kind="lookup", entity="  ")
+        self.assertIsNone(blank.entity, "a blank entity normalizes to None")
 
     def test_unknown_lookup_kind_rejected(self):
         with self.assertRaises(ValidationError):

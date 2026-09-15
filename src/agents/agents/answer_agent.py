@@ -97,6 +97,22 @@ class AnswerAgent(LLMRoleAgent):
         hits = context.outputs.get("hits") or []
 
         if not hits:
+            existing = (context.outputs.get("answer") or "").strip()
+            if existing:
+                # A deterministic upstream step already wrote the reply
+                # (knowledge lookup miss: "no entity named X"): keep it
+                # verbatim — phrasing it again could only damage it.
+                context.emit(
+                    "task", "answer_kept",
+                    "reply already produced upstream (deterministic lookup) — "
+                    "kept verbatim",
+                )
+                return AgentResult(
+                    agent_name=self.name,
+                    status=AgentStatus.OK,
+                    detail="reply produced upstream",
+                    payload={"answer": existing, "no_answer": True},
+                )
             # Deterministic path: nothing to ground on, no LLM call — the
             # prompt's rule "no corpus, no answer" enforced in Python.
             # The fallback reply honors the detected reply language like

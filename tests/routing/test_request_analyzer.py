@@ -110,9 +110,10 @@ class AnalyzerTest(unittest.TestCase):
         answer = json.dumps({
             "retrieval": [
                 {"question": "Who is the King of the North",
-                 "lookup_kind": "semantic", "utterance": "Who is the King of the North?"},
+                 "lookup_kind": "lookup", "entity": "King of the North",
+                 "utterance": "Who is the King of the North?"},
                 {"question": "family tree of the King of the North",
-                 "lookup_kind": "relation", "utterance": "especially his family tree"},
+                 "lookup_kind": "relationship", "utterance": "especially his family tree"},
             ],
             "general": [],
         })
@@ -122,7 +123,9 @@ class AnalyzerTest(unittest.TestCase):
             "Who is the King of the North? Especially his family tree."
         )
         self.assertEqual(len(result.retrieval), 2)
-        self.assertEqual(result.retrieval[1].lookup_kind.value, "relation")
+        self.assertEqual(result.retrieval[0].lookup_kind.value, "lookup")
+        self.assertEqual(result.retrieval[0].entity, "King of the North")
+        self.assertEqual(result.retrieval[1].lookup_kind.value, "relationship")
 
 
 if __name__ == "__main__":
