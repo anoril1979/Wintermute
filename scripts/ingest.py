@@ -26,6 +26,10 @@ Arguments:
     -d / --delete              remove the document from the corpus (the
                               source file in data/sources is kept)
     -q / --quiet               print only errors (results go to the log)
+    -p / --plain               progress display without ANSI control codes
+                              (automatic fallback otherwise)
+    --no-progress              raw log lines on the console (the historical
+                              behaviour); details always go to the log
 
 Every issue and ingestion error is reported to ``data/logs/ingestion.log``
 (in addition to the console), and the script returns a **non-zero exit
@@ -97,13 +101,14 @@ def ingestion_log_path() -> Path:
     return DEFAULT_INGESTION_LOG
 
 
-def _configure_ingestion_logging(quiet: bool, log_path: Path | None = None) -> None:
+def _configure_ingestion_logging(quiet: bool, log_path: Path | None = None) -> logging.Handler:
     """Install console + file handlers for the CLI run.
 
     The file handler writes to the configured ``ingestion_log`` (default:
     ``data/logs/ingestion.log``) so every issue, warning and error survives
     the console session. With ``--quiet``, the console prints WARNING and
-    above only.
+    above only. Returns the console handler so the caller can silence it
+    while the progress display owns the terminal.
     """
     log_file = log_path if log_path is not None else ingestion_log_path()
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +130,7 @@ def _configure_ingestion_logging(quiet: bool, log_path: Path | None = None) -> N
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
+    return console
 
 
 def _resolve_or_report(document: str, delete: bool) -> int:
@@ -164,6 +170,14 @@ def main(argv: list | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "-p", "--plain", action="store_true", dest="plain",
+        help="Progress display without ANSI control codes (auto otherwise)",
+    )
+    parser.add_argument(
+        "--no-progress", action="store_true", dest="no_progress",
+        help="Raw log lines instead of the progress display",
+    )
+    parser.add_argument(
         "-i", "--input", dest="input", required=True,
         help="The document to ingest or delete (file name in the documents tree)",
         metavar="FILE",
@@ -195,10 +209,14 @@ def main(argv: list | None = None) -> int:
     if args.delete:
         if args.origin or args.force or args.summarize:
             parser.error("--delete cannot be combined with -o/-f/-s")
-        # Delegate to the dedicated removal CLI (user-facing semantics).
+        # Delegate to the dedicated removal CLI (user-facing semantics),
+        # passing the console-rendering preferences through.
         from scripts.remove import main as remove_main
 
-        return remove_main(["-i", args.input] + (["-q"] if args.quiet else []))
+        extra = (["-p"] if args.plain else []) \
+            + (["--no-progress"] if args.no_progress else []) \
+            + (["-q"] if args.quiet else [])
+        return remove_main(["-i", args.input] + extra)
 
     if not args.origin:
         parser.error(
@@ -206,7 +224,7 @@ def main(argv: list | None = None) -> int:
             f"({' | '.join(ORIGINS)}); use --delete to remove a document"
         )
 
-    _configure_ingestion_logging(args.quiet)
+    console_handler = _configure_ingestion_logging(args.quiet)
     logger.info("=== ingestion requested: '%s' (origin=%s, force=%s, summarize=%s)",
                 args.input, args.origin, args.force, args.summarize)
 
@@ -215,21 +233,53 @@ def main(argv: list | None = None) -> int:
         return exit_code
 
     resolution = resolve_document(args.input)
+
+    # Console rendering: live checklist by default, raw log lines with
+    # --no-progress, errors only with -q. While the display owns the
+    # terminal the console log handler is silenced (the file keeps
+    # everything) — raw lines would otherwise scramble the redraws.
+    display = None
+    if not args.quiet and not args.no_progress:
+        from src.tools.cli_progress import IngestionDisplay
+
+        display = IngestionDisplay.create(
+            title=(f"Ingesting '{args.input}' "
+                   f"(origin={args.origin}, force={args.force}, "
+                   f"summarize={args.summarize})"),
+            plain=args.plain,
+        )
+        if display is not None:
+            if console_handler is not None:
+                console_handler.setLevel(logging.CRITICAL)
+            display.start()
+
+    def _on_event(event: dict) -> None:
+        if display is not None:
+            display(event)
+
     result = ingestion_orchestrator.run_ingestion_file(
         Path(str(resolution["path"])),
         force=args.force,
         force_summarization=args.summarize,
         origin=args.origin,
+        on_event=_on_event,
     )
 
     status = result.get("status")
     if status == ingestion_orchestrator.STATUS_CONFIG_ERROR:
+        detail = f"[CONFIG ERROR] {result.get('message')} — {result.get('fix_hint')}"
+        if display is not None:
+            display.finish(ok=False, message=detail)
         logger.error("[CONFIG ERROR] %s", result.get("message"))
         logger.error("Hint: %s", result.get("fix_hint"))
         return EXIT_CONFIG
     if status == ingestion_orchestrator.STATUS_ACCEPTED:
         completed = ", ".join(result.get("completed_steps", [])) or "no step"
         skipped = result.get("skipped_steps") or []
+        summary = (f"Ingestion of '{result.get('document')}' completed "
+                   f"(steps: {completed})")
+        if display is not None:
+            display.finish(ok=True, message=summary)
         logger.info("Ingestion of '%s' completed (steps: %s).",
                     result.get("document"), completed)
         if skipped:
@@ -237,6 +287,11 @@ def main(argv: list | None = None) -> int:
                         ", ".join(skipped))
         return EXIT_OK
     if status == ingestion_orchestrator.STATUS_NOT_IMPLEMENTED:
+        detail = (f"pipeline not fully wired yet "
+                  f"(failed step: {result.get('failed_step')} - "
+                  f"{result.get('failure_detail')})")
+        if display is not None:
+            display.finish(ok=False, message=detail)
         logger.warning(
             "Ingestion of '%s' accepted but the pipeline is not fully "
             "wired yet (failed step: %s — %s)",
@@ -244,10 +299,14 @@ def main(argv: list | None = None) -> int:
             result.get("failure_detail"),
         )
         return EXIT_FAILURE
+    detail = (result.get("failure_detail") or result.get("reason")
+              or str(status))
+    if display is not None:
+        display.finish(ok=False, message=str(detail))
     logger.error(
         "Ingestion of '%s' failed: %s",
         result.get("document"),
-        result.get("failure_detail") or result.get("reason") or status,
+        detail,
     )
     return EXIT_FAILURE
 

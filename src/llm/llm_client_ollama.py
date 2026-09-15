@@ -247,7 +247,7 @@ class LLMClientOllama:
                     payload.get("model"),
                     payload.get("options", {}).get("num_predict"),
                 )
-                logger.debug(">>> prompt: %s", payload.get("prompt"))
+                # logger.debug(">>> prompt: %s", payload.get("prompt"))
                 response = self._client.post(path, json=payload)
                 response.raise_for_status()
                 return response.json()

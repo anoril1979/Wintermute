@@ -206,11 +206,13 @@ class SummarizerAgent(LLMRoleAgent):
                 return resumed
 
         min_chars, max_chars = summary_limits()
+        units_total = sum(1 for _ in self._iter_units(document))
         context.emit(
             "task", "summarization_start",
             f"summarizing '{document.title}' "
             f"(copy below {min_chars} chars, target {max_chars} chars, "
             f"role '{self._llm_role}')",
+            units_total=units_total,
         )
 
         stats: Dict[str, int] = {

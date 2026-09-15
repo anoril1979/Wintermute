@@ -5,6 +5,7 @@ ingesting is the opposite of removing. This script performs the same
 deletion, spelled the way a human thinks it:
 
     python scripts/remove.py -i "meow.pdf"
+    python scripts/remove.py -i "meow.pdf" -p   # plain ASCII (no ANSI)
 
 What is removed (everything the ingestion projected):
 
@@ -68,6 +69,14 @@ def main(argv: list | None = None) -> int:
         "-q", "--quiet", action="store_true",
         help="Console prints errors only; details go to data/logs/ingestion.log",
     )
+    parser.add_argument(
+        "-p", "--plain", action="store_true", dest="plain",
+        help="Progress display without ANSI control codes (auto otherwise)",
+    )
+    parser.add_argument(
+        "--no-progress", action="store_true", dest="no_progress",
+        help="Raw log lines instead of the progress display",
+    )
     args = parser.parse_args(argv)
 
     _configure_ingestion_logging(args.quiet)
@@ -78,6 +87,21 @@ def main(argv: list | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 — a crash is still a failure
         logger.exception("Corpus removal of '%s' crashed: %s", args.input, exc)
         return EXIT_FAILURE
+
+    # Console rendering: a one-pass checklist from the removal report by
+    # default; raw log lines with --no-progress; errors only with -q.
+    # Rejected requests (unknown file, bad reference) keep the plain log
+    # path — the checklist has nothing to show for them.
+    if (not args.quiet and not args.no_progress
+            and report.get("status") in (STATUS_REMOVED, STATUS_PARTIAL)):
+        from src.tools.cli_progress import RemovalDisplay
+
+        display = RemovalDisplay.create(
+            title=f"Removing '{args.input}' from the corpus",
+            plain=args.plain,
+        )
+        if display is not None:
+            display.render(report)
 
     status = report.get("status")
     if status == STATUS_REMOVED:
