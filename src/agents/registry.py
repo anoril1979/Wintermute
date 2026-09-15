@@ -18,6 +18,7 @@ from src.agents.agents.knowledge_lookup_agent import KnowledgeLookupAgent
 from src.agents.agents.knowledge_validation_agent import KnowledgeValidatorAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
 from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
+from src.agents.agents.consolidation_agent import ConsolidationAgent
 from src.agents.agents.source_indexing_agent import SourceIndexingAgent
 from src.agents.agents.source_registration_agent import SourceRegistrationAgent
 from src.agents.agents.summarizer_agent import SummarizerAgent
@@ -34,6 +35,8 @@ def build_default_agents() -> Dict[str, IngestionAgent]:
         "content_extractor": PDFExtractionAgent(),
         "extraction_validator": ExtractionValidationAgent(),
         "summarizer": SummarizerAgent(),
+        # Pre-indexing merge pass: no LLM, no store rewrite.
+        "consolidator": ConsolidationAgent(),
         "source_indexer": SourceIndexingAgent(),
         # First knowledge pass: LLM extraction of the characters.
         "knowledge_extractor": CharacterExtractionAgent(),

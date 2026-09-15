@@ -76,6 +76,12 @@ class IngestionGraph:
     DEFAULT_STEPS: List[GraphStep] = [
         GraphStep(name="content_extraction", agent_key="content_extractor"),
         GraphStep(name="extraction_validation", agent_key="extraction_validator"),
+        # Consolidation: merge too-small text blocks (paragraph_min_length /
+        # paragraph_max_length) BEFORE summarization, so every summary
+        # describes the FINAL block structure — never blocks that are about
+        # to be merged away. In-memory + cache JSON; the extraction store
+        # stays untouched.
+        GraphStep(name="consolidation", agent_key="consolidator"),
         GraphStep(name="hierarchical_summarization", agent_key="summarizer"),
         # First SOURCE COLLECTION node: chunking + embedding + vector storage
         # of the document content (blocks + summaries) into source_chunks.

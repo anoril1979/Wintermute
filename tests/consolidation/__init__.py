@@ -1,0 +1,1 @@
+"""Consolidation-pass test package."""

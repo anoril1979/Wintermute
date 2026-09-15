@@ -230,6 +230,9 @@ class OrchestratorPlugTest(unittest.TestCase):
         self._summarizer_jobs = ExtractionJobFile(
             self.pdf_path.parent / "summarization_jobs.json"
         )
+        # Hermetic consolidation cache: the real agent would otherwise
+        # write data/cache/consolidation/doc.json from the temp source.
+        self._consolidation_dir = self.pdf_path.parent / "consolidation"
 
     def _registry(self, **overrides):
         """The default registry with hermetic extraction + summarization
@@ -240,6 +243,10 @@ class OrchestratorPlugTest(unittest.TestCase):
 
         registry = build_default_agents()
         registry["summarizer"] = SummarizerAgent(job_file=self._summarizer_jobs)
+        from src.agents.agents.consolidation_agent import ConsolidationAgent
+        registry["consolidator"] = ConsolidationAgent(
+            output_dir=self._consolidation_dir
+        )
         # The knowledge extractor makes real LLM calls and writes the real
         # data/cache/knowledge folder: stub it like the indexer.
         registry["knowledge_extractor"] = _StubKnowledgeExtractor()
@@ -280,7 +287,8 @@ class OrchestratorPlugTest(unittest.TestCase):
         self.assertEqual(
             result["completed_steps"],
             ["content_extraction", "extraction_validation",
-             "hierarchical_summarization", "source_indexing",
+             "consolidation", "hierarchical_summarization",
+             "source_indexing",
              "knowledge_extraction", "knowledge_validation"],
         )
         self.assertEqual(result["not_implemented_steps"], ["check_and_merge"])

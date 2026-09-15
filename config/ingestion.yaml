@@ -86,6 +86,28 @@ summarization_job_file: "data/cache/summarization_jobs.json"
 summary_min_chars: 1000
 summary_max_chars: 2500
 
+# 3bis. Consolidation — the pre-summarization merge pass (no LLM). Between
+#    extraction validation and summarization, every section's text blocks
+#    are rebuilt: a block shorter than paragraph_min_length (the HARD low
+#    limit) is merged with the next one, repeatedly, until the result
+#    reaches about paragraph_max_length (the SOFT high limit — merging
+#    stops once it reaches about or above max). A trailing block still
+#    under the hard limit falls back onto the previous one; a section
+#    reduced to a single still-small block is left as is (sections are
+#    never merged). The merged block keeps the FIRST merged block's id,
+#    so citations stay valid. Running BEFORE summarization means every
+#    summary describes the final block structure. The consolidated view
+#    replaces the extraction in memory only — the extraction JSON store
+#    is untouched — and is written to consolidation_output_dir as
+#    <stem>.json for human inspection and later resume.
+#
+#    paragraph_min_length: 500    # hard low limit (characters)
+#    paragraph_max_length: 1000   # soft high limit (characters)
+#    consolidation_output_dir: "data/cache/consolidation"
+paragraph_min_length: 500
+paragraph_max_length: 1000
+consolidation_output_dir: "data/cache/consolidation"
+
 # 4. Knowledge extraction — first step of the knowledge layer: the
 #    CharacterExtractionAgent reads the summarized document and extracts
 #    the characters (full name, short name, aliases) it finds, one LLM

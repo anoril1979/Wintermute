@@ -400,6 +400,10 @@ def validate_ingestion_config(config: object) -> dict:
       ``summary_max_chars`` are strictly positive numbers when present
       (the summarizer copies content below the first one verbatim and
       targets the second one);
+    * optional consolidation settings ``paragraph_min_length`` and
+      ``paragraph_max_length`` are strictly positive ints when present,
+      with max >= min (the pre-summarization merge limits), and
+      ``consolidation_output_dir`` is a usable path reference;
     * optional ``ingestion_log`` is a string, usable (non-traversal) path
       reference when present — the durable log of the ingestion CLI
       (scripts/ingest.py, scripts/remove.py);
@@ -515,6 +519,31 @@ def validate_ingestion_config(config: object) -> dict:
                 f"(valeur : {value!r})."
             )
 
+    # -- optional consolidation settings -------------------------------------
+    # paragraph_min_length / paragraph_max_length: the pre-summarization merge
+    # limits. Validated HERE (fail-fast, same as every other key) AND in
+    # the agent: validation covers malformed yaml, the agent covers a
+    # min/max crossing when one key is edited by hand between runs.
+    if "paragraph_min_length" in config or "paragraph_max_length" in config:
+        for key in ("paragraph_min_length", "paragraph_max_length"):
+            if key not in config:
+                continue
+            value = config[key]
+            if not isinstance(value, int) or isinstance(value, bool) \
+                    or value <= 0:
+                raise IngestionConfigError(
+                    f"{prefix} : '{key}' doit être un entier strictement "
+                    f"positif (valeur : {value!r})."
+                )
+        if ("paragraph_min_length" in config
+                and "paragraph_max_length" in config
+                and config["paragraph_max_length"]
+                < config["paragraph_min_length"]):
+            raise IngestionConfigError(
+                f"{prefix} : 'paragraph_max_length' ({config['paragraph_max_length']}) "
+                "doit être >= 'paragraph_min_length' "
+                f"({config['paragraph_min_length']})."
+            )
     # -- optional CLI log path -----------------------------------------------
     if "ingestion_log" in config:
         value = config["ingestion_log"]
@@ -536,7 +565,8 @@ def validate_ingestion_config(config: object) -> dict:
 
     # -- optional extraction settings ---------------------------------------
     for key in ("extraction_output_dir", "extraction_mineru_output_dir",
-                "summarization_output_dir", "knowledge_output_dir",
+                "summarization_output_dir", "consolidation_output_dir",
+                "knowledge_output_dir",
                 "knowledge_base_dir",
                 "mineru_json_extension", "extraction_job_file",
                 "summarization_job_file"):
@@ -554,7 +584,8 @@ def validate_ingestion_config(config: object) -> dict:
                 "(supprimez la clé pour utiliser la valeur par défaut)."
             )
         if key in ("extraction_output_dir", "extraction_mineru_output_dir",
-                   "summarization_output_dir", "knowledge_output_dir",
+                   "summarization_output_dir", "consolidation_output_dir",
+                   "knowledge_output_dir",
                    "knowledge_base_dir",
                    "extraction_job_file", "summarization_job_file") \
                 and not _is_valid_relative_path(value):
