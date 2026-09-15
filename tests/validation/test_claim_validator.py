@@ -94,7 +94,7 @@ class ClaimValidatorUseCaseTestCase(unittest.TestCase):
 
     def test_character_to_character_claim(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         subject, obj = self.validator.validate(claim, self.entities)
         self.assertIs(subject, self.jean)
@@ -102,21 +102,21 @@ class ClaimValidatorUseCaseTestCase(unittest.TestCase):
 
     def test_character_to_place_claim(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.LIVES_IN, object_id="place:paris"
+            subject_id="character:jean", predicate=Predicate.LIVES_IN, object_id="place:paris"
         )
         _, obj = self.validator.validate(claim, self.entities)
         self.assertIs(obj, self.paris)
 
     def test_character_to_object_claim(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.OWNS, object_id="object:sword"
+            subject_id="character:jean", predicate=Predicate.OWNS, object_id="object:sword"
         )
         _, obj = self.validator.validate(claim, self.entities)
         self.assertIs(obj, self.sword)
 
     def test_value_only_claim(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.OCCUPATION, value="mayor"
+            subject_id="character:jean", predicate=Predicate.OCCUPATION, value="mayor"
         )
         subject, obj = self.validator.validate(claim, self.entities)
         self.assertIs(subject, self.jean)
@@ -124,7 +124,7 @@ class ClaimValidatorUseCaseTestCase(unittest.TestCase):
 
     def test_symmetric_swap_round_trip(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         swapped = self.validator.swapped(claim)
         subject, obj = self.validator.validate(swapped, self.entities)
@@ -133,17 +133,17 @@ class ClaimValidatorUseCaseTestCase(unittest.TestCase):
 
     def test_swapped_rejects_non_symmetric(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.OWNS, object_id="object:sword"
+            subject_id="character:jean", predicate=Predicate.OWNS, object_id="object:sword"
         )
         with self.assertRaises(ClaimValidationError):
             self.validator.swapped(claim)
 
     def test_can_swap_flag(self):
         symmetric = make_claim(
-            subject_id="char:jean", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         directional = make_claim(
-            subject_id="char:jean", predicate=Predicate.OWNS, object_id="object:sword"
+            subject_id="character:jean", predicate=Predicate.OWNS, object_id="object:sword"
         )
         self.assertTrue(self.validator.can_swap(symmetric))
         self.assertFalse(self.validator.can_swap(directional))
@@ -273,7 +273,7 @@ class ClaimValidatorSourceWiringTestCase(unittest.TestCase):
 
     def _claim(self, **source_kw):
         return make_claim(
-            subject_id="char:jean",
+            subject_id="character:jean",
             predicate=Predicate.OCCUPATION,
             value="mayor",
             sources=[SourceRef(locator_id=self.book.id, **source_kw)],
@@ -290,7 +290,7 @@ class ClaimValidatorSourceWiringTestCase(unittest.TestCase):
 
     def test_invalid_locator_rejects_claim(self):
         claim = make_claim(
-            subject_id="char:jean",
+            subject_id="character:jean",
             predicate=Predicate.OCCUPATION,
             value="mayor",
             sources=[SourceRef(locator_id="source:999")],
@@ -318,42 +318,42 @@ class ClaimValidatorErrorTestCase(unittest.TestCase):
     def test_unknown_predicate(self):
         validator = ClaimValidator(registry={})  # injected empty registry
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.KNOWS, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.KNOWS, object_id="character:marie"
         )
         with self.assertRaises(UnknownPredicateError):
             validator.validate(claim, self.entities)
 
     def test_unknown_subject(self):
         claim = make_claim(
-            subject_id="char:nobody", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:nobody", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         with self.assertRaises(UnknownSubjectError):
             self.validator.validate(claim, self.entities)
 
     def test_invalid_subject_type(self):
         claim = make_claim(
-            subject_id="place:paris", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="place:paris", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         with self.assertRaises(InvalidSubjectTypeError):
             self.validator.validate(claim, self.entities)
 
     def test_unknown_object(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.LIVES_IN, object_id="place:nowhere"
+            subject_id="character:jean", predicate=Predicate.LIVES_IN, object_id="place:nowhere"
         )
         with self.assertRaises(UnknownObjectError):
             self.validator.validate(claim, self.entities)
 
     def test_object_on_value_only_predicate(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.OCCUPATION, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.OCCUPATION, object_id="character:marie"
         )
         with self.assertRaises(InvalidObjectTypeError):
             self.validator.validate(claim, self.entities)
 
     def test_invalid_object_type(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.OWNS, object_id="place:paris"
+            subject_id="character:jean", predicate=Predicate.OWNS, object_id="place:paris"
         )
         with self.assertRaises(InvalidObjectTypeError):
             self.validator.validate(claim, self.entities)
@@ -361,7 +361,7 @@ class ClaimValidatorErrorTestCase(unittest.TestCase):
     def test_errors_are_value_errors(self):
         # ClaimValidationError subclasses ValueError: legacy except ValueError keeps working.
         claim = make_claim(
-            subject_id="char:nobody", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:nobody", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         with self.assertRaises(ValueError):
             self.validator.validate(claim, self.entities)
@@ -369,7 +369,7 @@ class ClaimValidatorErrorTestCase(unittest.TestCase):
     def test_multi_type_definition_accepts_any_listed_type(self):
         # lives_in accepts CHARACTER subjects; entity ids agree.
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.LIVES_IN, object_id="place:paris"
+            subject_id="character:jean", predicate=Predicate.LIVES_IN, object_id="place:paris"
         )
         self.validator.validate(claim, self.entities)  # must not raise
 
@@ -383,7 +383,7 @@ class EntityRegistrySideEffectsTestCase(unittest.TestCase):
 
     def test_validate_does_not_mutate_claim_or_entities(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         before_claim = claim.model_dump()
         before_subject = self.jean.model_dump()
@@ -393,12 +393,12 @@ class EntityRegistrySideEffectsTestCase(unittest.TestCase):
 
     def test_swapped_returns_a_copy_not_the_original(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         swapped = self.validator.swapped(claim)
         self.assertIsNot(swapped, claim)
-        self.assertEqual(claim.subject_id, "char:jean")  # original untouched
-        self.assertEqual(swapped.subject_id, "char:marie")
+        self.assertEqual(claim.subject_id, "character:jean")  # original untouched
+        self.assertEqual(swapped.subject_id, "character:marie")
 
 
 if __name__ == "__main__":

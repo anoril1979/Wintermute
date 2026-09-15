@@ -23,8 +23,8 @@ from src.agents.agents.entity_resolver_agent import (
 from src.agents.contexts import IngestionContext
 from src.agents.protocols import AgentStatus
 from src.knowledge.character_markdown_store import (
-    INDEX_FILENAME,
     characters_dir,
+    index_path_for,
     read_character,
 )
 
@@ -170,7 +170,7 @@ class StatusMappingTest(ResolverBaseTest):
             {"full_name": "Joe le Clodo", "aliases": ["Bobby"],
              "source_ids": ["doc:a::sec:1"]},
         ])
-        index = self.chars / INDEX_FILENAME
+        index = index_path_for(self.base)
         self.assertTrue(index.exists())
         text = index.read_text(encoding="utf-8")
         self.assertIn("- Joe le Clodo (aka: Bobby)", text)
@@ -200,7 +200,7 @@ class IndexScanTest(unittest.TestCase):
         self.resolver.run(context)
         from src.knowledge.character_markdown_store import load_index
 
-        characters = load_index(self.chars / INDEX_FILENAME)
+        characters = load_index(index_path_for(self.base))
         self.assertEqual(
             [c["full_name"] for c in characters], ["A", "B"]
         )
@@ -221,7 +221,7 @@ class IndexScanTest(unittest.TestCase):
         self.resolver.run(context)
         from src.knowledge.character_markdown_store import load_index
 
-        characters = load_index(self.chars / INDEX_FILENAME)
+        characters = load_index(index_path_for(self.base))
         self.assertEqual(
             [c["full_name"] for c in characters], ["A", "Hand Made"]
         )
@@ -245,7 +245,7 @@ class ValidateHookTest(unittest.TestCase):
             {"full_name": "A", "aliases": [], "source_ids": ["doc:a::1"]},
         ])
         self.resolver.run(context)
-        (self.chars / INDEX_FILENAME).unlink()
+        index_path_for(self.base).unlink()
         validation = self.resolver.validate(context)
         self.assertIsNotNone(validation)
         self.assertEqual(validation.failure_domain.value, "input_data")

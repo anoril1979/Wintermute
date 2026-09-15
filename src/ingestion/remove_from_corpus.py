@@ -8,9 +8,10 @@ The ingestion pipeline projects one source document onto several stores:
                                    summarization)
     data/extracted/<stem>.json     the canonical extracted content
     data/summarized/<stem>.json    the LLM summaries
-    data/cache/knowledge/<stem>.json  the knowledge cache (characters...)
-    data/knowledge/characters/*.md   the knowledge base (alias-source ids
-                                     purged; empty characters deleted)
+    data/cache/knowledge/<stem>.json  the knowledge cache (characters,
+                                     places...)
+    data/knowledge/<type>/*.md       the knowledge base (alias-source ids
+                                     purged; empty entities deleted)
     data/knowledge/sources/<doc>.md  the source registration (deleted:
                                      the document leaves the base)
     data/extracted/mineru/<stem>/  MinerU's own sandbox (PDFs only)
@@ -169,88 +170,91 @@ def _remove_json_files(source_path: Optional[Path], stem: str) -> Dict[str, Any]
 def _purge_knowledge_base(doc_id: str) -> Dict[str, Any]:
     """Purge the document's provenance from the markdown knowledge base.
 
-    Every character file is scanned for ``<doc_id>::`` source ids (the
-    unit-level provenance the extraction stamped and the resolver wrote):
+    Every entity file of every type (characters, places, ... per the
+    store's ``ENTITY_TYPES``) is scanned for ``<doc_id>::`` source ids
+    (the unit-level provenance the extraction stamped and the resolver
+    wrote):
 
     * ids of the removed document are dropped from every name's sources;
     * a name left with no source at all is pruned — that name was only
       ever seen in the removed document;
-    * a character left with no name at all loses its file;
-    * the sidecar index is then rebuilt from the files (the files are
-      the truth, the index their projection — same rule as the
-      resolver's end-of-pass sync).
+    * an entity left with no name at all loses its file;
+    * each type's sidecar index is then rebuilt from the files (the
+      files are the truth, the index their projection — same rule as
+      the resolver's end-of-pass sync).
 
     Returns ``{"ok": bool, "purged_files": n, "deleted_files": n, "reason"?}``.
     """
     try:
         from src.knowledge.character_markdown_store import (
+            ENTITY_TYPES,
             CharacterMarkdownError,
-            characters_dir,
+            entities_dir,
             index_path_for,
-            read_character,
+            read_entity,
             rebuild_index,
-            write_character,
+            write_entity,
         )
 
-        folder = characters_dir()
-        if not folder.is_dir():
-            # No knowledge base yet: nothing to purge, not an error.
-            return {"ok": True, "purged_files": 0, "deleted_files": 0}
-
-        index_name = index_path_for().name
         prefix = f"{doc_id}::"
         purged_files = 0
         deleted_files = 0
-
-        for path in sorted(folder.glob("*.md")):
-            if path.name == index_name:
+        for entity_type in ENTITY_TYPES:
+            folder = entities_dir(None, entity_type)
+            if not folder.is_dir():
+                # No base for this type yet: nothing to purge, not an
+                # error, and NO index rebuild (an absent folder must not
+                # materialize an empty sidecar listing).
                 continue
-            try:
-                data = read_character(path)
-            except CharacterMarkdownError as exc:
-                # A malformed file is reported, not silently purged.
-                return {"ok": False, "purged_files": purged_files,
-                        "deleted_files": deleted_files,
-                        "reason": f"{path.name}: {exc}"}
 
-            full_name = str(data["full_name"])
-            kept_names: list = []
-            changed = False
-            for name in data["names"]:  # type: ignore[union-attr]
-                sources = name.get("source_ids")
-                if isinstance(sources, list):
-                    kept = [s for s in sources if not str(s).startswith(prefix)]
-                    if kept != sources:
-                        name["source_ids"] = kept
-                        changed = True
-                    if not kept:
-                        # The name was only ever seen in the removed
-                        # document: prune the alias bullet entirely.
-                        changed = True
-                        continue
-                kept_names.append(name)
+            index_name = index_path_for(None, entity_type).name
+            for path in sorted(folder.glob("*.md")):
+                if path.name == index_name:
+                    continue
+                try:
+                    data = read_entity(path)
+                except CharacterMarkdownError as exc:
+                    # A malformed file is reported, not silently purged.
+                    return {"ok": False, "purged_files": purged_files,
+                            "deleted_files": deleted_files,
+                            "reason": f"{path.name}: {exc}"}
 
-            if not changed:
-                continue
-            if kept_names:
-                write_character(full_name, kept_names, path)
-                purged_files += 1
-            else:
-                path.unlink()
-                deleted_files += 1
-                logger.info(
-                    "Knowledge base: character with no remaining source "
-                    "removed: %s", path.name,
-                )
+                full_name = str(data["full_name"])
+                kept_names: list = []
+                changed = False
+                for name in data["names"]:  # type: ignore[union-attr]
+                    sources = name.get("source_ids")
+                    if isinstance(sources, list):
+                        kept = [s for s in sources if not str(s).startswith(prefix)]
+                        if kept != sources:
+                            name["source_ids"] = kept
+                            changed = True
+                        if not kept:
+                            # The name was only ever seen in the removed
+                            # document: prune the alias bullet entirely.
+                            changed = True
+                            continue
+                    kept_names.append(name)
 
-        # The listing is rebuilt from the FILES — single-writer rule: the
-        # index is the projection of the per-character files, so a removed
-        # character's line disappears here by construction (never edited
-        # line-by-line in parallel). REBUILT AT THE BASE ROOT: index_path_for
-        # expects the knowledge BASE dir — passing the characters folder
-        # nested the write one level too deep and left the real listing
-        # stale (the bug this line replaces).
-        rebuild_index()
+                if not changed:
+                    continue
+                if kept_names:
+                    write_entity(full_name, kept_names, path, entity_type)
+                    purged_files += 1
+                else:
+                    path.unlink()
+                    deleted_files += 1
+                    logger.info(
+                        "Knowledge base: %s entity with no remaining source "
+                        "removed: %s", entity_type, path.name,
+                    )
+
+            # The listing is rebuilt from the FILES — single-writer rule:
+            # the index is the projection of the per-entity files, so a
+            # removed entity's line disappears here by construction (never
+            # edited line-by-line in parallel). Rebuilt per type at the BASE
+            # root (index_path_for expects the base dir, not the folder).
+            rebuild_index(None, entity_type)
         return {"ok": True, "purged_files": purged_files,
                 "deleted_files": deleted_files}
     except Exception as exc:  # noqa: BLE001 — reported, not raised

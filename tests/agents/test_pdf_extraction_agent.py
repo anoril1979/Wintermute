@@ -238,7 +238,7 @@ class OrchestratorPlugTest(unittest.TestCase):
         """The default registry with hermetic extraction + summarization
         + knowledge stores and the real extractor/indexer/LLM swapped for
         stubs."""
-        from src.agents.agents.character_extraction_agent import CharacterExtractionAgent
+        from src.agents.agents.entity_extraction_agent import CharacterExtractionAgent
         from src.agents.agents.summarizer_agent import SummarizerAgent
 
         registry = build_default_agents()

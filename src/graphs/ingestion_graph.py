@@ -87,11 +87,20 @@ class IngestionGraph:
         # of the document content (blocks + summaries) into source_chunks.
         # (The former content_embedding / content_storage placeholder pair.)
         GraphStep(name="source_indexing", agent_key="source_indexer"),
+        # Knowledge passes — one parallel sub-pipeline per entity type:
+        # extract (LLM) -> validate (deterministic) -> check-n-merge
+        # (deterministic). Each type owns its payload key, cache key and
+        # knowledge-base subfolder; a type's agents failing stops the run
+        # like any other step (a half-populated knowledge base is worse
+        # than a failed run).
         GraphStep(name="knowledge_extraction", agent_key="knowledge_extractor"),
         GraphStep(name="knowledge_validation", agent_key="knowledge_validator"),
-        # check-n-merge: the EntityResolver reconciles the discovered
+        # check-n-merge: the EntityResolvers reconcile the discovered
         # entities into the markdown knowledge base (create-or-merge).
         GraphStep(name="check_and_merge", agent_key="entity_resolver"),
+        GraphStep(name="places_extraction", agent_key="place_extractor"),
+        GraphStep(name="places_validation", agent_key="place_validator"),
+        GraphStep(name="places_check_and_merge", agent_key="place_resolver"),
         # Source registration: the document itself becomes a knowledge
         # entity (metadata markdown + sources.md listing).
         GraphStep(name="source_registration", agent_key="source_registrar"),

@@ -311,10 +311,12 @@ class SourceRegistrationWiringTest(unittest.TestCase):
 
         names = [s.name for s in IngestionGraph.DEFAULT_STEPS]
         self.assertIn("source_registration", names)
+        # The registration follows the LAST entity-resolution step (the
+        # per-type knowledge pipelines: characters then places).
         self.assertEqual(
             names.index("source_registration"),
-            names.index("check_and_merge") + 1,
-            "the registration follows the entity resolution",
+            names.index("places_check_and_merge") + 1,
+            "the registration follows the entity resolutions",
         )
 
     def test_registry_includes_the_agent(self):

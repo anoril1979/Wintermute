@@ -5,11 +5,13 @@ EntityResolver's writes): given the entity name the user asked about
 (``lookup`` request kind, spelled as the user wrote it), find the
 knowledge file holding its identity block.
 
-Three matching strategies, cheapest-first:
+Every entity type's folder is scanned (characters first, then places,
+organizations... per :data:`ENTITY_TYPES`), each with the same three
+cheapest-first strategies:
 
-1. **Direct slug** — ``<slug-of-name>.md`` exists in ``characters/``
-   (one ``stat`` on the expected path);
-2. **Index scan** — the ``characters.md`` sidecar (ONE small file, the
+1. **Direct slug** — ``<type>/<slug-of-name>.md`` exists (one ``stat``
+   on the expected path);
+2. **Index scan** — the ``<type>.md`` sidecar (ONE small file, the
    resolver's batch surface): exact match on a full name or an alias,
    case- and accent-insensitive (the user rarely spells the corpus's
    names exactly);
@@ -21,7 +23,7 @@ Three matching strategies, cheapest-first:
    :func:`close_candidates` (containment on names and aliases).
 
 No LLM anywhere: identity resolution is a file-system question. The
-index is read, never written here — files are the truth, the index
+indexes are read, never written here — files are the truth, the index
 their projection (the resolver and the removal purge own the writes).
 """
 
@@ -29,15 +31,17 @@ from __future__ import annotations
 
 import logging
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from src.helpers.strings import fold
 from src.knowledge.character_markdown_store import (
+    ENTITY_TYPES,
     CharacterMarkdownError,
     character_path_for,
     characters_dir,
+    entity_path_for,
     index_path_for,
     load_index,
     read_character,
@@ -53,7 +57,7 @@ class EntityMatch:
 
     #: Canonical full name (the file's title line — the identity).
     full_name: str
-    #: The character markdown file (``<base>/characters/<slug>.md``).
+    #: The entity markdown file (``<base>/<type>/<slug>.md``).
     path: Path
     #: Parsed ``Known names:`` entries — ``{"alias", "source_ids": [str]}``
     #: (first entry is the full name itself), straight from
@@ -85,10 +89,9 @@ def fold_name(name: str) -> str:
 
     'Épée de Vif-Argent' and 'epée de vif argent' fold to the same key —
     user input must match corpus names that are rarely typed identically.
+    Thin wrapper over the canonical helper (src/helpers/strings.py).
     """
-    text = unicodedata.normalize("NFKD", str(name))
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    return fold(str(name))
 
 
 def resolve_entity(
@@ -96,11 +99,13 @@ def resolve_entity(
 ) -> Optional[EntityMatch]:
     """Resolve a user-named entity to its knowledge file.
 
-    Strategies (in order): direct slug file → index scan (full names,
-    then aliases — case/accent-insensitive) → unique containment (the
-    user's words span exactly one known full name). ``None`` when
-    nothing matches unambiguously; the caller then renders the
-    deterministic "unknown entity" reply (with :func:`close_candidates`).
+    Every entity type is scanned in :data:`ENTITY_TYPES` order
+    (characters first); within a type, the same cheapest-first
+    strategies run: direct slug file → index scan (full names, then
+    aliases — case/accent-insensitive) → unique containment (the user's
+    words span exactly one known full name). ``None`` when nothing
+    matches unambiguously; the caller then renders the deterministic
+    "unknown entity" reply (with :func:`close_candidates`).
 
     A stale index entry (its file was hand-deleted) triggers one
     ``rebuild_index()`` — files are the truth — and the resolution is
@@ -116,8 +121,14 @@ def resolve_entity(
 
     # One repair pass: the index may be stale relative to the files
     # (hand-edited base). Files are the truth; rebuild and retry once.
+    # Only types whose folder exists are rebuilt: the repair must never
+    # materialize empty sidecar listings for types the corpus does not
+    # use yet (the purge's rule: an absent folder is not a base).
     try:
-        rebuild_index(base_dir)
+        from src.knowledge.character_markdown_store import entities_dir
+        for entity_type in ENTITY_TYPES:
+            if entities_dir(base_dir, entity_type).is_dir():
+                rebuild_index(base_dir, entity_type)
     except CharacterMarkdownError as exc:
         logger.warning("Knowledge-base index rebuild failed: %s", exc)
         return None
@@ -135,54 +146,59 @@ def _resolve_by_unique_containment(
     ``full_name_hits`` from :func:`close_candidates` — containment in
     either direction, FULL NAMES only (aliases are too fuzzy to
     auto-resolve). Exactly one hit → that entity; otherwise None (the
-    caller lists the candidates)."""
+    caller lists the candidates).
+    """
     folded = fold_name(query)
     if not folded:
         return None
-    try:
-        entries = load_index(index_path_for(base_dir))
-    except CharacterMarkdownError as exc:
-        logger.warning("Knowledge-base index unreadable: %s", exc)
-        return None
-    hits = []
-    for entry in entries:
-        full_name = str(entry["full_name"])
-        target = fold_name(full_name)
-        if folded in target or target in folded:
-            hits.append(full_name)
-    if len(hits) != 1:
-        return None
-    return _load_match(character_path_for(hits[0], base_dir))
+    for entity_type in ENTITY_TYPES:
+        try:
+            entries = load_index(index_path_for(base_dir, entity_type))
+        except CharacterMarkdownError as exc:
+            logger.warning("Knowledge-base index unreadable: %s", exc)
+            continue
+        hits = []
+        for entry in entries:
+            full_name = str(entry["full_name"])
+            target = fold_name(full_name)
+            if folded in target or target in folded:
+                hits.append(full_name)
+        if len(hits) == 1:
+            return _load_match(entity_path_for(hits[0], base_dir, entity_type))
+    return None
 
 
 def _resolve_once(query: str, base_dir: Optional[Path]) -> Optional[EntityMatch]:
     folded = fold_name(query)
 
-    # 1. Direct slug: the user's spelling may BE the file name.
-    direct = character_path_for(query, base_dir)
-    match = _load_match(direct)
-    if match is not None:
-        return match
+    for entity_type in ENTITY_TYPES:
+        # 1. Direct slug: the user's spelling may BE the file name.
+        direct = entity_path_for(query, base_dir, entity_type)
+        match = _load_match(direct)
+        if match is not None:
+            return match
 
-    # 2. Index scan (one small file): full names first, then aliases.
-    try:
-        entries = load_index(index_path_for(base_dir))
-    except CharacterMarkdownError as exc:
-        logger.warning("Knowledge-base index unreadable: %s", exc)
-        return None
-    for entry in entries:
-        if fold_name(str(entry["full_name"])) == folded:
-            found = _load_match(character_path_for(str(entry["full_name"]), base_dir))
-            if found is not None:
-                return found
-    for entry in entries:
-        for alias in entry.get("aliases") or []:
-            if fold_name(str(alias)) == folded:
+        # 2. Index scan (one small file): full names first, then aliases.
+        try:
+            entries = load_index(index_path_for(base_dir, entity_type))
+        except CharacterMarkdownError as exc:
+            logger.warning("Knowledge-base index unreadable: %s", exc)
+            continue
+        for entry in entries:
+            if fold_name(str(entry["full_name"])) == folded:
                 found = _load_match(
-                    character_path_for(str(entry["full_name"]), base_dir)
+                    entity_path_for(str(entry["full_name"]), base_dir, entity_type)
                 )
                 if found is not None:
                     return found
+        for entry in entries:
+            for alias in entry.get("aliases") or []:
+                if fold_name(str(alias)) == folded:
+                    found = _load_match(
+                        entity_path_for(str(entry["full_name"]), base_dir, entity_type)
+                    )
+                    if found is not None:
+                        return found
     return None
 
 
@@ -219,6 +235,7 @@ def close_candidates(
     direction: the query may be a fragment of a name or contain it —
     "vif-argent" finds "Épée de vif-argent"). Full-name hits rank above
     alias hits; equal rank keeps the index order (alphabetical files).
+    Every entity type's index is scanned (characters first).
     """
     query = (entity or "").strip()
     if not query:
@@ -227,35 +244,41 @@ def close_candidates(
     if not folded:
         return []
 
-    try:
-        entries = load_index(index_path_for(base_dir))
-    except CharacterMarkdownError as exc:
-        logger.warning("Knowledge-base index unreadable: %s", exc)
-        return []
-
     full_name_hits: List[str] = []
     alias_hits: List[str] = []
-    for entry in entries:
-        full_name = str(entry["full_name"])
-        if folded and (folded in fold_name(full_name) or fold_name(full_name) in folded):
-            if full_name not in full_name_hits:
-                full_name_hits.append(full_name)
+    seen: set = set()
+    for entity_type in ENTITY_TYPES:
+        try:
+            entries = load_index(index_path_for(base_dir, entity_type))
+        except CharacterMarkdownError as exc:
+            logger.warning("Knowledge-base index unreadable: %s", exc)
             continue
-        for alias in entry.get("aliases") or []:
-            alias_folded = fold_name(str(alias))
-            if folded in alias_folded or alias_folded in folded:
-                if full_name not in alias_hits:
+        for entry in entries:
+            full_name = str(entry["full_name"])
+            if full_name in seen:
+                continue
+            if folded and (folded in fold_name(full_name) or fold_name(full_name) in folded):
+                full_name_hits.append(full_name)
+                seen.add(full_name)
+                continue
+            for alias in entry.get("aliases") or []:
+                alias_folded = fold_name(str(alias))
+                if folded in alias_folded or alias_folded in folded:
                     alias_hits.append(full_name)
-                break
+                    seen.add(full_name)
+                    break
     return (full_name_hits + alias_hits)[: max(1, limit)]
 
 
 def known_entity_count(base_dir: Optional[Path] = None) -> int:
-    """How many entities the base lists (the sidecar index's length)."""
-    try:
-        return len(load_index(index_path_for(base_dir)))
-    except CharacterMarkdownError:
-        return 0
+    """How many entities the base lists, across every type's index."""
+    total = 0
+    for entity_type in ENTITY_TYPES:
+        try:
+            total += len(load_index(index_path_for(base_dir, entity_type)))
+        except CharacterMarkdownError:
+            continue
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +400,7 @@ def _config_max_content_hits() -> int:
 
 __all__ = [
     "DEFAULT_MAX_CONTENT_HITS",
+    "ENTITY_TYPES",
     "EntityMatch",
     "characters_dir",
     "close_candidates",

@@ -24,8 +24,8 @@ Respond with a single JSON object, no prose, no markdown fences:
 
 - `full_name`: the name most often seen in the sources for this character.
 - `short_name`: the shortest name by which the character is usually called
-  (used to build the stable id `char:<short_name>`; slugified downstream).
-  When only a full name exists, repeat it.
+  (used to build the stable id `character:<short_name>`; slugified
+  downstream). When only a full name exists, repeat it.
 - `aliases`: every other way the character is called in the text — short
   names, hypocoristics, pseudonyms, titles ("Monseigneur"), nicknames.
   Empty list when none.

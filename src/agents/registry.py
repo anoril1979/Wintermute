@@ -11,11 +11,17 @@ from __future__ import annotations
 from typing import Dict
 
 from src.agents.agents.answer_agent import AnswerAgent
-from src.agents.agents.character_extraction_agent import CharacterExtractionAgent
-from src.agents.agents.entity_resolver_agent import CharacterResolver
+from src.agents.agents.entity_extraction_agent import (
+    CharacterExtractionAgent,
+    PlaceExtractionAgent,
+)
+from src.agents.agents.entity_resolver_agent import CharacterResolver, PlaceResolver
 from src.agents.agents.extraction_validation_agent import ExtractionValidationAgent
 from src.agents.agents.knowledge_lookup_agent import KnowledgeLookupAgent
-from src.agents.agents.knowledge_validation_agent import KnowledgeValidatorAgent
+from src.agents.agents.knowledge_validation_agent import (
+    CharacterValidatorAgent,
+    PlaceValidatorAgent,
+)
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
 from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
 from src.agents.agents.consolidation_agent import ConsolidationAgent
@@ -41,10 +47,15 @@ def build_default_agents() -> Dict[str, IngestionAgent]:
         # First knowledge pass: LLM extraction of the characters.
         "knowledge_extractor": CharacterExtractionAgent(),
         # Semantic gate on the discovered entities (deterministic).
-        "knowledge_validator": KnowledgeValidatorAgent(),
+        "knowledge_validator": CharacterValidatorAgent(),
         # check_and_merge: reconcile discovered characters into the
         # markdown knowledge base (create-or-merge, no LLM).
         "entity_resolver": CharacterResolver(),
+        # Second knowledge pass: PLACES — the exact same pipeline shape,
+        # its own payload keys and knowledge-base subfolder.
+        "place_extractor": PlaceExtractionAgent(),
+        "place_validator": PlaceValidatorAgent(),
+        "place_resolver": PlaceResolver(),
         # The document itself becomes a knowledge entity: a markdown
         # registration file named by its unified id (no LLM).
         "source_registrar": SourceRegistrationAgent(),

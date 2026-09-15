@@ -18,11 +18,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from src.agents.agents.character_extraction_agent import (
-    OUTPUT_KEY,
+from src.agents.agents.entity_extraction_agent import (
     CharacterExtractionAgent,
     EntityExtractionAgent,
 )
+
+#: The character pass's context payload key (derived from ENTITY_TYPE).
+OUTPUT_KEY = "knowledge_characters"
 from src.agents.contexts import IngestionContext
 from src.agents.llm_roles import MissingLLMRoleError
 from src.extraction.models import (
@@ -227,7 +229,7 @@ class ExtractionCycleTest(unittest.TestCase):
     def test_save_failure_is_reported_not_fatal(self):
         agent = StubKnowledgeAgent(json.dumps({"characters": []}))
         with mock.patch(
-            "src.agents.agents.character_extraction_agent.save_knowledge",
+            "src.agents.agents.entity_extraction_agent.save_knowledge",
             side_effect=OSError("disk full"),
         ):
             result, context = run_agent(agent, make_document())

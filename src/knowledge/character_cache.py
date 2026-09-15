@@ -1,12 +1,13 @@
-"""Knowledge cache — per-document character extractions.
+"""Knowledge cache — per-document entity extractions.
 
 First persistence layer of the knowledge ingestion: after the
-CharacterExtractionAgent's LLM passes, the extracted characters are stored
-under ``knowledge_output_dir`` (config/ingestion.yaml, default
-``data/cache/knowledge``) as ``<document stem>.json``.
+EntityExtractionAgent's LLM passes, the discovered entities (characters,
+places, ...) are stored under ``knowledge_output_dir``
+(config/ingestion.yaml, default ``data/cache/knowledge``) as
+``<document stem>.json``.
 
-The file is deliberately **plain** — a single
-``{"characters": [...]}`` object, pretty-printed UTF-8, no envelope, no
+The file is deliberately **plain** — a single ``{"<key>": [...]}`` object
+(``characters``, ``places``...), pretty-printed UTF-8, no envelope, no
 fingerprint: it is a working cache of what the LLM found, meant to be
 read (and hand-fixed) by the human before the knowledge validation,
 check-n-merge and storage layers consume it. Identity and staleness are
@@ -23,6 +24,11 @@ Design mirrors the other project stores:
 * defensive loading — malformed JSON raises
   :class:`KnowledgeJsonError` (a ``ValueError``) with an explicit path
   locator, so a hand-edit gone wrong is reported, not silently ignored.
+
+One folder hosts every entity type, each document under its own
+``<stem>.json`` and each type under its own payload key — the extraction
+of a second type (places) overwrites only its own key of the same
+document's file.
 """
 
 from __future__ import annotations
@@ -111,19 +117,32 @@ def knowledge_unit_granularity() -> str:
 # File I/O
 # ---------------------------------------------------------------------------
 
-def save_knowledge(characters: list, path: Path) -> Path:
-    """Serialize the character payload to ``path`` (pretty UTF-8, atomic).
+def save_knowledge(entries: list, path: Path, entry_key: str = "characters") -> Path:
+    """Serialize one entity type's payload to ``path`` (pretty UTF-8, atomic).
 
     Args:
-        characters: list of character dicts as produced by the extraction
-            agent (``full_name`` / ``short_name`` / ``aliases``).
+        entries: list of entity dicts as produced by the extraction agent
+            (e.g. ``full_name`` / ``short_name`` / ``aliases``).
         path: target ``<stem>.json`` path.
+        entry_key: payload key of this entity type (``"characters"`` /
+            ``"places"``). The key is MERGED into an existing file, so a
+            document's characters and places live side by side without
+            overwriting each other.
 
     Returns the written path.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload: Dict[str, Any] = {"characters": list(characters)}
+    existing: Dict[str, Any] = {}
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (json.JSONDecodeError, OSError):
+            existing = {}  # a broken file is replaced, not merged
+    payload: Dict[str, Any] = {**existing, entry_key: list(entries)}
     tmp_name: str = ""
     try:
         fd, tmp_name = tempfile.mkstemp(
@@ -143,15 +162,16 @@ def save_knowledge(characters: list, path: Path) -> Path:
     return path
 
 
-def load_knowledge(path: Path) -> Dict[str, Any]:
+def load_knowledge(path: Path, entry_key: str = "characters") -> Dict[str, Any]:
     """Load a knowledge-cache JSON file.
 
-    Returns the raw payload dict (``{"characters": [...]}``).
+    Returns the raw payload dict (``{"characters": [...]}``,
+    ``{"places": [...]}``...).
 
     Raises:
         FileNotFoundError: the file does not exist.
         KnowledgeJsonError: the file is not valid JSON, is not an object,
-            or its ``characters`` entry is not a list of objects — a
+            or its ``entry_key`` entry is not a list of objects — a
             hand-edit gone wrong must be reported, not ignored.
     """
     path = Path(path)
@@ -170,11 +190,11 @@ def load_knowledge(path: Path) -> Dict[str, Any]:
         raise KnowledgeJsonError(
             f"{path}: root must be an object, got {type(data).__name__}"
         )
-    characters = data.get("characters")
-    if not isinstance(characters, list) or any(
-        not isinstance(entry, dict) for entry in characters
+    entries = data.get(entry_key)
+    if not isinstance(entries, list) or any(
+        not isinstance(entry, dict) for entry in entries
     ):
         raise KnowledgeJsonError(
-            f"{path}: 'characters' must be a list of objects"
+            f"{path}: '{entry_key}' must be a list of objects"
         )
     return data

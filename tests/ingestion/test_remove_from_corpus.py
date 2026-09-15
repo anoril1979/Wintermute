@@ -23,7 +23,6 @@ from src.ingestion.remove_from_corpus import (
     remove_document,
 )
 from src.knowledge.character_markdown_store import (
-    INDEX_FILENAME,
     character_path_for,
     characters_dir,
     index_path_for,
@@ -45,11 +44,12 @@ class PurgeTest(unittest.TestCase):
         self.base = Path(tempfile.mkdtemp())
         self.chars = characters_dir(self.base)
         self.chars.mkdir(parents=True, exist_ok=True)
-        # The purge resolves the REAL config folder: redirect it to the
-        # temp base for every test of this class.
+        # The purge resolves the REAL config base dir (one folder per
+        # entity type): redirect the ROOT to the temp base for every
+        # test of this class.
         patcher = unittest.mock.patch(
-            "src.knowledge.character_markdown_store.characters_dir",
-            return_value=self.chars,
+            "src.knowledge.character_markdown_store.knowledge_base_dir",
+            return_value=self.base,
         )
         patcher.start()
         self.addCleanup(patcher.stop)

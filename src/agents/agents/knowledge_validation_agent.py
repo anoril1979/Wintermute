@@ -1,20 +1,28 @@
 """KnowledgeValidationAgent — semantic gate on the discovered entities.
 
-The ``knowledge_validation`` graph step (agent key ``knowledge_validator``).
-Runs after knowledge extraction and BEFORE the check-and-merge resolver:
-the markdown knowledge base must only ever receive well-formed entities,
-so this step validates every discovered entry — deterministically, no LLM:
+The ``knowledge_validation`` graph step (agent keys ``knowledge_validator``
+/ ``place_validator``). Runs after knowledge extraction and BEFORE the
+check-and-merge resolvers: the markdown knowledge base must only ever
+receive well-formed entities, so this step validates every discovered
+entry — deterministically, no LLM:
 
 * **shape** — dict entry, non-empty string ``full_name``, optional string
   ``short_name``, list-of-strings ``aliases``, list-of-strings
   ``source_ids``;
 * **provenance format** — every ``source_ids`` entry must be a full
   hierarchical unit id (``doc:<8hex>[::chp:1::pg:2::sec:1 ...]``,
-  src/extraction/ids.py) — the resolver writes them into the knowledge
+  src/extraction/ids.py) — the resolvers write them into the knowledge
   base and the removal engine purges by the ``doc:<8hex>::`` prefix, so a
   malformed id here would poison both downstream behaviors;
-* **model consistency** — the entry instantiates the ``Character``
-  knowledge model (id derivation from short/full name must succeed).
+* **model consistency** — the entry instantiates the type's knowledge
+  model (``Character`` / ``Place``; id derivation from short/full name
+  must succeed).
+
+Architecture: the reusable check loop lives in
+:class:`EntityValidatorAgent`; each entity type derives it with its
+``INPUT_KEY`` / ``ENTRIES_KEY`` and model. Derivations:
+:class:`CharacterValidatorAgent` (characters), :class:`PlaceValidatorAgent`
+(places).
 
 Failure mapping (the project's domain philosophy): a malformed entry is
 an LLM misformed response that slipped past the extraction parse —
@@ -37,21 +45,18 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
+
+from pydantic import BaseModel
 
 from src.agents.contexts import IngestionContext
 from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
-from src.knowledge.models import Character
+from src.knowledge.models import Character, Place
 
 logger = logging.getLogger(__name__)
 
-#: Context key this agent reads (the knowledge extraction wrote it).
-INPUT_KEY = "knowledge_characters"
-
 #: Payload key this agent writes its report under.
 OUTPUT_KEY = "knowledge_validation"
-
-AGENT_NAME = "knowledge_validator"
 
 #: Full hierarchical unit id: ``doc:<8hex>`` followed by one or more
 #: ``::<level>:<n>`` segments (chp/pg/sec/txt, 1-based counters). Every
@@ -63,13 +68,33 @@ UNIT_ID_PATTERN = re.compile(
 )
 
 
-class KnowledgeValidatorAgent:
-    """Validates the discovered entities before check-and-merge."""
+class EntityValidatorAgent:
+    """Validates one entity type's discovered entries before check-and-merge.
 
-    name = AGENT_NAME
+    Subclasses declare the context payload key (``INPUT_KEY``), the entry
+    list key (``ENTRIES_KEY``) and the pydantic model each entry must
+    instantiate; the base class owns every check.
+    """
+
+    #: Context payload key this validator consumes (subclass MUST set it).
+    INPUT_KEY = ""
+
+    #: Key of the entry list inside the extraction payload ("characters").
+    ENTRIES_KEY = "characters"
+
+    #: Knowledge model every entry must satisfy (subclass MUST set it).
+    MODEL: Type[BaseModel] = Character
+
+    #: Human label in the traces ("character" / "place").
+    ENTITY_LABEL = "character"
+
+    def __init__(self) -> None:
+        self.name = "knowledge_validator"
+
+    # -- graph step -----------------------------------------------------------
 
     def run(self, context: IngestionContext) -> AgentResult:
-        payload: Optional[Dict[str, Any]] = context.outputs.get(INPUT_KEY)
+        payload: Optional[Dict[str, Any]] = context.outputs.get(self.INPUT_KEY)
 
         if payload is None:
             return AgentResult(
@@ -78,13 +103,15 @@ class KnowledgeValidatorAgent:
                 detail="no knowledge extraction output to validate",
             )
 
-        entries = payload.get("characters")
+        entries = payload.get(self.ENTRIES_KEY)
         if not isinstance(entries, list):
-            return self._failed(context, "extraction payload has no 'characters' list")
+            return self._failed(
+                context, f"extraction payload has no '{self.ENTRIES_KEY}' list"
+            )
 
         context.emit(
             "task", "knowledge_check",
-            f"validating {len(entries)} discovered character(s)",
+            f"validating {len(entries)} discovered {self.ENTITY_LABEL}(s)",
             entries=len(entries),
         )
 
@@ -93,7 +120,7 @@ class KnowledgeValidatorAgent:
         seen_full_names: Dict[str, int] = {}
 
         for index, entry in enumerate(entries):
-            where = f"characters[{index}]"
+            where = f"{self.ENTRIES_KEY}[{index}]"
             if not isinstance(entry, dict):
                 problems.append(f"{where}: entry must be an object, "
                                 f"got {type(entry).__name__}")
@@ -134,13 +161,13 @@ class KnowledgeValidatorAgent:
             elif not source_ids:
                 warnings.append(
                     f"{where} ({full_name!r}): no source id — the knowledge base "
-                    "will record this character without provenance"
+                    f"will record this {self.ENTITY_LABEL} without provenance"
                 )
 
             # Model consistency: id derivation must succeed (short_name or
             # full_name slugified) and the prefix must agree with the type.
             try:
-                Character(
+                self.MODEL(
                     full_name=full_name.strip(),
                     short_name=(short_name.strip() if isinstance(short_name, str)
                                 and short_name.strip() else None),
@@ -148,8 +175,8 @@ class KnowledgeValidatorAgent:
                     source_ids=[s.strip() for s in source_ids if isinstance(s, str)],
                 )
             except ValueError as exc:
-                problems.append(f"{where} ({full_name!r}): invalid character "
-                                f"model: {exc}")
+                problems.append(f"{where} ({full_name!r}): invalid "
+                                f"{self.ENTITY_LABEL} model: {exc}")
                 continue
 
             key = full_name.strip().lower()
@@ -160,7 +187,7 @@ class KnowledgeValidatorAgent:
                 warnings.append(
                     f"{count} entries share the full name '{name}' — the resolver "
                     "will merge them (check the short names if they are distinct "
-                    "characters)"
+                    "entities)"
                 )
 
         for warning in warnings:
@@ -177,11 +204,12 @@ class KnowledgeValidatorAgent:
 
         context.emit(
             "task", "knowledge_validated",
-            f"all {len(entries)} discovered character(s) valid "
+            f"all {len(entries)} discovered {self.ENTITY_LABEL}(s) valid "
             f"({len(warnings)} warning(s))",
             entries=len(entries), warnings=len(warnings),
         )
-        report = {"entries": len(entries), "warnings": warnings}
+        report = {"entries": len(entries), "warnings": warnings,
+                  "entity_type": self.ENTITY_LABEL}
         context.outputs[OUTPUT_KEY] = report
         return AgentResult(agent_name=self.name, status=AgentStatus.OK,
                            payload=report)
@@ -206,3 +234,25 @@ class KnowledgeValidatorAgent:
             detail=f"knowledge validation failed: {detail}",
             payload={"problems": problems or [detail]},
         )
+
+
+class CharacterValidatorAgent(EntityValidatorAgent):
+    """Validates the discovered CHARACTERS (historical default)."""
+
+    INPUT_KEY = "knowledge_characters"
+    ENTRIES_KEY = "characters"
+    MODEL = Character
+    ENTITY_LABEL = "character"
+
+
+class PlaceValidatorAgent(EntityValidatorAgent):
+    """Validates the discovered PLACES."""
+
+    INPUT_KEY = "knowledge_places"
+    ENTRIES_KEY = "places"
+    MODEL = Place
+    ENTITY_LABEL = "place"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "place_validator"

@@ -22,7 +22,8 @@ Output: the collected entries are stored as a plain, human-editable JSON
 file under ``knowledge_output_dir`` (config/ingestion.yaml, default
 ``data/cache/knowledge``) as ``<document stem>.json`` — see
 ``src/knowledge/character_cache.py``. The step output also lands in
-``context.outputs[OUTPUT_KEY]`` for the in-memory consumers (the future
+``context.outputs[<entity type's OUTPUT_KEY>]`` for the in-memory
+consumers (the future
 knowledge-validation step reads the stores, not the context).
 
 Failure handling: the graph's retry policy applies — an LLM call error or
@@ -77,9 +78,6 @@ class UnitUnreadableError(ValueError):
 #: Context key this agent reads (the extraction produced by content_extraction).
 INPUT_KEY = "content_extraction"
 
-#: Context key / payload key this agent writes its result under.
-OUTPUT_KEY = "knowledge_characters"
-
 #: Marker the prompt defines for an unusable input (LLM protocol): the
 #: answer then carries an ``error`` field instead of entries.
 ERROR_MARKER_KEY = "error"
@@ -88,30 +86,47 @@ ERROR_MARKER_KEY = "error"
 #: ``knowledge_unit_granularity``).
 GRANULARITIES = ("section", "page", "chapter")
 
-#: Where the characters prompt lives (CharacterExtractionAgent default).
-CHARACTER_PROMPT_PATH = Path("prompts/knowledge/character_extraction.md")
-
 
 class EntityExtractionAgent(LLMRoleAgent):
     """Walks the document's content units and extracts entities via the LLM.
 
-    Subclasses declare the prompt (``prompt_path`` or ``PROMPT_PATH`` class
-    attribute) and the role; the base class owns the unit walk, the
-    prompt/call/parse cycle, cross-unit dedup and the cache persistence.
+    Subclasses declare ONE type key, ``ENTITY_TYPE`` (singular slug:
+    ``"character"``, ``"place"`` — mirroring the ``EntityType`` enum
+    values, src/knowledge/models.py); the base derives everything else:
+
+    * the prompt file: ``prompts/knowledge/<type>_extraction.md``;
+    * the LLM answer key and the cache entry key: ``<type>s``;
+    * the context payload key: ``knowledge_<type>s``.
+
+    The shared role (``knowledge_extractor``) and every behavior — the
+    unit walk, the prompt/call/parse cycle, entry cleaning, cross-unit
+    dedup and merge, cache persistence — live here. A subclass may still
+    override ``PROMPT_PATH`` / ``OUTPUT_ENTRY_KEY`` / ``OUTPUT_KEY`` for
+    a non-derivable layout; tests may pass ``prompt_path=`` directly.
     """
 
-    #: Prompt file for this entity type (subclass MUST set it).
-    PROMPT_PATH: Path = CHARACTER_PROMPT_PATH
+    #: Singular entity-type slug of this pass (subclass MUST set it):
+    #: ``"character"``, ``"place"``, ... Also the LLM prompt's subject.
+    ENTITY_TYPE: str = ""
 
-    #: Key of the entry list inside the LLM's JSON answer (subclass MUST
-    #: set it, e.g. "characters" for characters, "places" for places).
-    OUTPUT_ENTRY_KEY: str = ""
+    #: Shared LLM role of every entity-extraction pass (config/llm.yaml).
+    llm_role = "knowledge_extractor"
+
+    #: Prompt file override (rare: the default derives
+    #: ``prompts/knowledge/<ENTITY_TYPE>_extraction.md``).
+    PROMPT_PATH: Optional[Path] = None
 
     def __init__(self, *args: Any, prompt_path: Optional[Path] = None,
                  granularity: Optional[str] = None,
                  output_dir: Optional[Path] = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._prompt_path = Path(prompt_path) if prompt_path else Path(self.PROMPT_PATH)
+        if not self.ENTITY_TYPE:
+            raise ValueError(
+                f"{type(self).__name__} must declare an ENTITY_TYPE "
+                "(e.g. 'character', 'place')"
+            )
+        default_prompt = Path(f"prompts/knowledge/{self.ENTITY_TYPE}_extraction.md")
+        self._prompt_path = Path(prompt_path) if prompt_path else (self.PROMPT_PATH or default_prompt)
         self._prompt_template: Optional[str] = None
         # Unit granularity override (tests); None reads ingestion.yaml.
         if granularity is not None and granularity not in GRANULARITIES:
@@ -122,6 +137,21 @@ class EntityExtractionAgent(LLMRoleAgent):
         self._granularity = granularity
         # Cache folder override (tests); None uses the config-driven default.
         self._output_dir = Path(output_dir) if output_dir else None
+
+    # -- Derived keys (overridable by plain class attributes) -----------------
+
+    @property
+    def OUTPUT_ENTRY_KEY(self) -> str:
+        """Key of the entry list inside the LLM's JSON answer and of the
+        cache entry: ``<type>s`` (e.g. ``characters`` / ``places``)."""
+        return f"{self.ENTITY_TYPE}s"
+
+    @property
+    def OUTPUT_KEY(self) -> str:
+        """Context payload key the result is written under:
+        ``knowledge_<type>s`` — one key per entity type, consumed by that
+        type's validator and resolver."""
+        return f"knowledge_{self.ENTITY_TYPE}s"
 
     # -- Configuration ---------------------------------------------------------
 
@@ -291,9 +321,37 @@ class EntityExtractionAgent(LLMRoleAgent):
         return cleaned
 
     def _clean_entry(self, entry: Dict[str, Any], label: str, index: int) -> Dict[str, Any]:
-        """Validate/normalize one raw entry. Subclasses override to check
-        their own fields; the base class only enforces a non-empty shape."""
-        return entry
+        """Validate/normalize one raw entry — the SHARED entity shape:
+        ``full_name`` (non-empty string), ``short_name`` (optional
+        string), ``aliases`` (list of strings). Error messages carry the
+        entry key so they read ``characters[0]...`` / ``places[0]...``.
+        Subclasses override only for extra fields."""
+        full_name = entry.get("full_name")
+        if not isinstance(full_name, str) or not full_name.strip():
+            raise ValueError(
+                f"{self.OUTPUT_ENTRY_KEY}[{index}] ({label}): 'full_name' must be a "
+                "non-empty string"
+            )
+        aliases = entry.get("aliases", [])
+        if aliases is None:
+            aliases = []
+        if not isinstance(aliases, list) or any(
+            not isinstance(alias, str) for alias in aliases
+        ):
+            raise ValueError(
+                f"{self.OUTPUT_ENTRY_KEY}[{index}] ({label}): 'aliases' must be a list "
+                "of strings"
+            )
+        short_name = entry.get("short_name")
+        if short_name is not None and not isinstance(short_name, str):
+            raise ValueError(
+                f"{self.OUTPUT_ENTRY_KEY}[{index}] ({label}): 'short_name' must be a string"
+            )
+        return {
+            "full_name": full_name.strip(),
+            "short_name": (short_name or "").strip() or None,
+            "aliases": [alias.strip() for alias in aliases if alias.strip()],
+        }
 
     #: Provenance key stamped on every entry: the list of the unit ids the
     #: entry was extracted from (one id per unit; unioned on dedup).
@@ -302,13 +360,31 @@ class EntityExtractionAgent(LLMRoleAgent):
     # -- Dedup ----------------------------------------------------------------------
 
     def _entry_identity(self, entry: Dict[str, Any]) -> Optional[tuple]:
-        """Dedup key of an entry across units, or None when it cannot be
-        identified (it is then kept as-is). Subclasses override."""
-        return None
+        """Dedup key of an entry across units: ``(full_name, short_name)``
+        case-folded — the shared identity rule. ``None`` when the entry
+        has no usable full name (it is then kept as-is)."""
+        full_name = (entry.get("full_name") or "").strip().lower()
+        if not full_name:
+            return None
+        short_name = (entry.get("short_name") or "").strip().lower()
+        return (full_name, short_name)
 
     def _merge_entries(self, kept: Dict[str, Any], duplicate: Dict[str, Any]) -> None:
-        """Merge a duplicate into the already-kept entry (in place).
-        Default: nothing (identity-less entries are never merged)."""
+        """Merge a duplicate into the already-kept entry (in place) — the
+        SHARED name-entity merge, symmetric with the base ``_clean_entry``
+        shape: union of aliases and of provenance ids (order-preserving),
+        first full/short names win. A character/place seen in several
+        units carries every alias and every unit it was found in.
+        Entity types with extra fields extend this (call ``super()``).
+        """
+        kept_aliases = kept.setdefault("aliases", [])
+        for alias in duplicate.get("aliases", []):
+            if alias and alias not in kept_aliases:
+                kept_aliases.append(alias)
+        kept_ids = kept.setdefault(self.SOURCE_ID_KEY, [])
+        for unit_id in duplicate.get(self.SOURCE_ID_KEY, []):
+            if unit_id and unit_id not in kept_ids:
+                kept_ids.append(unit_id)
 
     # -- Template ---------------------------------------------------------------------
 
@@ -399,10 +475,12 @@ class EntityExtractionAgent(LLMRoleAgent):
         cache_path = self._cache_path(document_path)
         if cache_path is not None:
             try:
-                saved_path = save_knowledge(entries, cache_path)
+                saved_path = save_knowledge(
+                    entries, cache_path, entry_key=self.OUTPUT_ENTRY_KEY,
+                )
             except (OSError, KnowledgeJsonError) as exc:
                 logger.warning("Could not save the knowledge cache: %s", exc)
-                context.errors[OUTPUT_KEY] = f"knowledge cache not saved: {exc}"
+                context.errors[self.OUTPUT_KEY] = f"knowledge cache not saved: {exc}"
                 context.emit("task", "knowledge_save_failed",
                              f"could not save the knowledge cache: {exc}")
             else:
@@ -426,7 +504,7 @@ class EntityExtractionAgent(LLMRoleAgent):
             "granularity": g,
             "cache_path": str(saved_path) if saved_path else None,
         }
-        context.outputs[OUTPUT_KEY] = payload
+        context.outputs[self.OUTPUT_KEY] = payload
         return AgentResult(
             agent_name=self.name, status=AgentStatus.OK, payload=payload,
         )
@@ -435,7 +513,7 @@ class EntityExtractionAgent(LLMRoleAgent):
         """After a successful run, the cache file must exist on disk when the
         step had a document to work on (a missing file means the store
         failed silently — a data-shaped problem, not an LLM one)."""
-        if context.outputs.get(OUTPUT_KEY) is None:
+        if context.outputs.get(self.OUTPUT_KEY) is None:
             return None
         document_path = getattr(context, "document_path", None)
         cache_path = self._cache_path(document_path)
@@ -481,62 +559,25 @@ class CharacterExtractionAgent(EntityExtractionAgent):
     ``full_name`` is the most precise name found in the unit, ``aliases``
     every other way the source refers to the character (short names,
     titles, pseudonyms — pronouns excluded). Cross-unit duplicates (same
-    full name + short name) are merged by union of aliases here; the real
+    full name + short name) are merged by union of aliases; the real
     identity resolution belongs to the later check-n-merge step.
     """
 
     name = "character_extractor"
-    llm_role = "knowledge_extractor"
-    PROMPT_PATH = CHARACTER_PROMPT_PATH
+    ENTITY_TYPE = "character"
 
-    #: Key of the entry list inside the LLM's JSON answer.
-    OUTPUT_ENTRY_KEY = "characters"
 
-    def _clean_entry(self, entry: Dict[str, Any], label: str, index: int) -> Dict[str, Any]:
-        """Enforce the character shape: non-empty string names, list aliases."""
-        full_name = entry.get("full_name")
-        if not isinstance(full_name, str) or not full_name.strip():
-            raise ValueError(
-                f"characters[{index}] ({label}): 'full_name' must be a "
-                "non-empty string"
-            )
-        aliases = entry.get("aliases", [])
-        if aliases is None:
-            aliases = []
-        if not isinstance(aliases, list) or any(
-            not isinstance(alias, str) for alias in aliases
-        ):
-            raise ValueError(
-                f"characters[{index}] ({label}): 'aliases' must be a list "
-                "of strings"
-            )
-        short_name = entry.get("short_name")
-        if short_name is not None and not isinstance(short_name, str):
-            raise ValueError(
-                f"characters[{index}] ({label}): 'short_name' must be a string"
-            )
-        return {
-            "full_name": full_name.strip(),
-            "short_name": (short_name or "").strip() or None,
-            "aliases": [alias.strip() for alias in aliases if alias.strip()],
-        }
+class PlaceExtractionAgent(EntityExtractionAgent):
+    """Extracts the places of the document (knowledge pass).
 
-    def _entry_identity(self, entry: Dict[str, Any]) -> Optional[tuple]:
-        full_name = (entry.get("full_name") or "").strip().lower()
-        if not full_name:
-            return None
-        short_name = (entry.get("short_name") or "").strip().lower()
-        return (full_name, short_name)
+    Exact sibling of :class:`CharacterExtractionAgent` on the shared
+    :class:`EntityExtractionAgent` walk: per content unit, the LLM returns
+    ``{"places": [{"full_name", "short_name", "aliases"}, ...]}``.
+    Cross-unit duplicates (same full name + short name) are merged by
+    union of aliases; the real identity resolution belongs to the later
+    check-n-merge step (``PlaceResolver``).
+    """
 
-    def _merge_entries(self, kept: Dict[str, Any], duplicate: Dict[str, Any]) -> None:
-        """Union of aliases (order-preserving); first full/short names win.
-        Provenance ids are unioned too — a character seen in several units
-        carries every unit it was found in."""
-        kept_aliases = kept.setdefault("aliases", [])
-        for alias in duplicate.get("aliases", []):
-            if alias and alias not in kept_aliases:
-                kept_aliases.append(alias)
-        kept_ids = kept.setdefault(self.SOURCE_ID_KEY, [])
-        for unit_id in duplicate.get(self.SOURCE_ID_KEY, []):
-            if unit_id and unit_id not in kept_ids:
-                kept_ids.append(unit_id)
+    name = "place_extractor"
+    ENTITY_TYPE = "place"
+

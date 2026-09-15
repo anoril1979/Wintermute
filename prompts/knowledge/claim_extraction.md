@@ -43,7 +43,8 @@ Respond with a single JSON object, no prose, no markdown fences:
 - `subject`/`object.kind` is one of: `character`, `place`, `object`, `event`,
   `organization`.
 - Reference entities by name as they appear in the text; the orchestrator
-  resolves them to ids (`char:...`, `place:001`, ...) — do not guess ids.
+  resolves them to ids (`character:...`, `place:001`, ...) — do not guess
+  ids.
 - `confidence` is your certainty the text actually asserts this claim, as a
   float between 0.0 and 1.0. Downgrade for implicit, ambiguous or
   ironical statements; a character's lie is still a claim *the character

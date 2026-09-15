@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from src.agents.agents.knowledge_validation_agent import KnowledgeValidatorAgent
+from src.agents.agents.knowledge_validation_agent import CharacterValidatorAgent
 from src.agents.contexts import IngestionContext
 from src.agents.protocols import AgentStatus
 
@@ -36,7 +36,7 @@ def valid_entry(**overrides):
 
 class ValidatorTest(unittest.TestCase):
     def setUp(self):
-        self.agent = KnowledgeValidatorAgent()
+        self.agent = CharacterValidatorAgent()
 
     def test_no_output_is_skipped(self):
         context = IngestionContext(document_path=Path("gazette.pdf"))
@@ -91,7 +91,7 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(len(result.payload["warnings"]), 1)
 
     def test_model_inconsistency_fails(self):
-        # 'char:...' style ids are internal: a Character model built from
+        # Ids are derived internally by the model: a Character built from
         # this entry must still derive cleanly — an entry that cannot
         # instantiate the model is a problem.
         context = make_context([valid_entry(full_name="   ", aliases=None)])

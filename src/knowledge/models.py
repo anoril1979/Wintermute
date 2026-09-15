@@ -2,10 +2,11 @@
 
 import os
 import re
-import unicodedata
 from enum import Enum
 from typing import List, Optional
 from urllib.parse import urlparse
+
+from src.helpers.strings import slugify
 
 from pydantic import (
     BaseModel,
@@ -67,7 +68,7 @@ _next_claim_id = _make_id_factory("claim")
 # -------------------------------------------------------------------
 
 # Entity references look like "<kind>:<identifier>", e.g. "source:001",
-# "char:jean", "place:001" — numeric ids remain valid.
+# "character:jean", "place:001" — numeric ids remain valid.
 _ENTITY_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*:[A-Za-z0-9][A-Za-z0-9_\-]*$")
 
 
@@ -261,7 +262,9 @@ class SourceRef(BaseModel):
 class EntityType(str, Enum):
     """Kind of entity a claim can refer to.
 
-    Extend this list (and ``_ENTITY_TYPE_PREFIXES`` below) when adding new
+    The value IS the entity-id prefix (``character:jean``,
+    ``place:paris``) — one canonical prefix per type, enforced by the
+    Entity consistency check below. Extend this list when adding new
     entity models.
     """
 
@@ -272,35 +275,13 @@ class EntityType(str, Enum):
     ORGANIZATION = "organization"
 
 
-# Maps an entity-id prefix to its EntityType, e.g. "char:jean" -> CHARACTER.
-# Used by the Entity consistency check below and by the validation/ingestion
-# layers (e.g. creating entities on the fly from an id prefix).
-# Update this mapping when adding a new EntityType.
-_ENTITY_TYPE_PREFIXES = {
-    "char": EntityType.CHARACTER,
-    "character": EntityType.CHARACTER,
-    "place": EntityType.PLACE,
-    "object": EntityType.OBJECT,
-    "obj": EntityType.OBJECT,
-    "event": EntityType.EVENT,
-    "organization": EntityType.ORGANIZATION,
-    "org": EntityType.ORGANIZATION,
-}
-
-
-def _entity_type_of(entity_id: str) -> Optional[EntityType]:
-    """Return the EntityType matching an entity id prefix, or None."""
-    prefix = entity_id.split(":", 1)[0].lower()
-    return _ENTITY_TYPE_PREFIXES.get(prefix)
-
-
 class Entity(BaseModel):
     """Base for every knowledge entity (Character, and future Place,
     Object, Event, Organization models).
 
     Attributes:
         id: Unique identifier of the form ``<kind>:<identifier>`` (e.g.
-            ``char:jean``, ``place:paris``) — readable, and stable across
+            ``character:jean``, ``place:paris``) — readable, and stable across
             runs so entities can be created on the fly without checking
             for existing ids; knowledge validators merge duplicates from
             these ids.
@@ -314,14 +295,25 @@ class Entity(BaseModel):
 
     @model_validator(mode="after")
     def _check_type_matches_prefix(self) -> "Entity":
-        """The id prefix, when recognized, must agree with ``type``."""
-        expected = _entity_type_of(self.id)
-        if expected is not None and expected is not self.type:
+        """The id prefix must BE the entity type (``character:jean`` with
+        ``type=character``) — strict: one canonical prefix per type, the
+        ``EntityType`` value itself. No alias prefixes (``char:``,
+        ``obj:``...) are tolerated, anywhere."""
+        prefix = self.id.split(":", 1)[0].lower()
+        if prefix != self.type.value:
             raise ValueError(
-                f"id '{self.id}' looks like a {expected.value} "
-                f"but type is '{self.type.value}'"
+                f"id '{self.id}' must start with '{self.type.value}:' "
+                f"(type is '{self.type.value}')"
             )
         return self
+
+
+def _slugify(name: str) -> str:
+    """Slug of a name for entity ids ('Édmond Dantès' -> 'edmond_dantes').
+
+    Thin wrapper over the canonical helper (src/helpers/strings.py).
+    """
+    return slugify(name, joiner="_")
 
 
 class ExtractedEntity(Entity):
@@ -354,18 +346,31 @@ class ExtractedEntity(Entity):
             cleaned.append(source_id.strip())
         return cleaned
 
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_id(cls, data):
+        """Derive ``<type>:<slug>`` when no explicit id is given — SHARED
+        by every extracted entity, no per-class copy.
+
+        The id is the slug of the LLM-extracted short name (falling back
+        to the full name), prefixed by the subclass's entity type (the
+        ``type`` field's default — ``character``, ``place``, ...).
+        Subclasses without a type default (the base itself) cannot derive
+        and are left untouched: ``type`` is required there.
+        """
+        if isinstance(data, dict) and not data.get("id"):
+            default_type = cls.model_fields["type"].default
+            if isinstance(default_type, EntityType):
+                base = data.get("short_name") or data.get("full_name") or ""
+                slug = _slugify(base)
+                if slug:
+                    data["id"] = f"{default_type.value}:{slug}"
+        return data
+
 
 # -------------------------------------------------------------------
 # Characters
 # -------------------------------------------------------------------
-
-def _slugify(name: str) -> str:
-    """Slugify a name for use in an entity id, e.g. 'Édmond Dantès' -> 'edmond_dantes'."""
-    text = unicodedata.normalize("NFKD", name)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
-    return text
-
 
 class Character(ExtractedEntity):
     """A character appearing across the documentary sources.
@@ -376,13 +381,13 @@ class Character(ExtractedEntity):
             derives from it when not given explicitly.
         aliases: Other names the character may appear under in the sources —
             short names, hypocoristics, actual aliases, pseudonyms, ...
-        id: Unique identifier of the form ``char:<short_name>`` — slug of
-            the LLM-extracted short name (e.g. ``char:jean``) — keeping
-            extracted data readable and letting characters be created on
-            the fly without checking for existing ids; the knowledge
-            validators check, create or merge characters from these ids.
-            An explicitly provided id always wins; falls back to a slug of
-            ``full_name`` when no short name is available.
+        id: Unique identifier of the form ``character:<short_name>`` —
+            slug of the LLM-extracted short name (e.g. ``character:jean``)
+            keeping extracted data readable and letting characters be
+            created on the fly without checking for existing ids; the
+            knowledge validators check, create or merge characters from
+            these ids. An explicitly provided id always wins; falls back
+            to a slug of ``full_name`` when no short name is available.
         type: Entity type, always CHARACTER (default — no need to pass it).
     """
 
@@ -391,16 +396,33 @@ class Character(ExtractedEntity):
     short_name: Optional[str] = None
     aliases: List[str] = Field(default_factory=list)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_id(cls, data):
-        """Derive ``char:<short_name>`` when no explicit id is given."""
-        if isinstance(data, dict) and not data.get("id"):
-            base = data.get("short_name") or data.get("full_name") or ""
-            slug = _slugify(base)
-            if slug:
-                data["id"] = f"char:{slug}"
-        return data
+
+# -------------------------------------------------------------------
+# Places
+# -------------------------------------------------------------------
+
+
+class Place(ExtractedEntity):
+    """A place appearing across the documentary sources.
+
+    Attributes:
+        full_name: The name most often used for the place (city, region,
+            building, landmark — any location the sources name).
+        short_name: Short name extracted by the dedicated LLM; the id
+            derives from it when not given explicitly.
+        aliases: Other names the place may appear under in the sources —
+            abbreviations, nicknames, historical or common names.
+        id: Unique identifier of the form ``place:<short_name>`` — slug of
+            the LLM-extracted short name (e.g. ``place:sombre_terre``).
+            An explicitly provided id always wins; falls back to a slug of
+            ``full_name`` when no short name is available.
+        type: Entity type, always PLACE (default — no need to pass it).
+    """
+
+    type: EntityType = EntityType.PLACE
+    full_name: str
+    short_name: Optional[str] = None
+    aliases: List[str] = Field(default_factory=list)
 
 
 # -------------------------------------------------------------------
@@ -520,13 +542,13 @@ class Claim(BaseModel):
     "soldier") when the target is not referenced as an entity.
 
     Attributes:
-        subject_id: Id of the entity the claim is about, e.g. ``char:003``
-            or ``char:jean``.
+        subject_id: Id of the entity the claim is about, e.g.
+            ``character:003`` or ``character:jean``.
         predicate: Predicate naming the relation; its definition (accepted
             entity types, symmetric/inverse) lives in the PREDICATES registry
             (see predicates.py) and is enforced by the validation layer.
         object_id: Id of the target entity, e.g. ``place:001`` or
-            ``char:002`` — None when the claim carries a simple value.
+            ``character:002`` — None when the claim carries a simple value.
         value: Simple literal value (e.g. ``"soldier"``) when the object is
             not referenced as an entity.
         status: ClaimStatus telling what the claim actually is — asserted,
@@ -560,7 +582,8 @@ class Claim(BaseModel):
         value = value.strip()
         if not _ENTITY_ID_PATTERN.match(value):
             raise ValueError(
-                "entity id must look like '<kind>:<identifier>', e.g. 'char:jean' or 'place:001'"
+                "entity id must look like '<kind>:<identifier>', e.g. "
+                "'character:jean' or 'place:001'"
             )
         return value
 

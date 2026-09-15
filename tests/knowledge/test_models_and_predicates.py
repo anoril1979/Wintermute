@@ -9,6 +9,7 @@ from src.knowledge.models import (
     Entity,
     EntityType,
     Page,
+    Place,
     Predicate,
     PredicateDefinition,
     Section,
@@ -31,20 +32,25 @@ class EntityTestCase(unittest.TestCase):
 
     def test_character_id_from_short_name(self):
         c = Character(full_name="Jean Valjean", short_name="Jean")
-        self.assertEqual(c.id, "char:jean")
+        self.assertEqual(c.id, "character:jean")
         self.assertEqual(c.type, EntityType.CHARACTER)
 
     def test_character_id_slugifies_accents_and_spaces(self):
         c = Character(full_name="Édmond Dantès", short_name="Édmond Dantès")
-        self.assertEqual(c.id, "char:edmond_dantes")
+        self.assertEqual(c.id, "character:edmond_dantes")
 
     def test_character_id_falls_back_to_full_name(self):
         c = Character(full_name="The Bishop")
-        self.assertEqual(c.id, "char:the_bishop")
+        self.assertEqual(c.id, "character:the_bishop")
 
     def test_character_explicit_id_wins(self):
-        c = Character(full_name="X", short_name="Y", id="char:custom")
-        self.assertEqual(c.id, "char:custom")
+        c = Character(full_name="X", short_name="Y", id="character:custom")
+        self.assertEqual(c.id, "character:custom")
+
+    def test_place_id_derives_with_its_type(self):
+        # The shared _derive_id: the prefix comes from the model's type.
+        p = Place(full_name="Sombre-Terre", short_name="Sombre-Terre")
+        self.assertEqual(p.id, "place:sombre_terre")
 
     def test_entity_rejects_prefix_type_mismatch(self):
         with self.assertRaises(Exception):
@@ -60,45 +66,45 @@ class ClaimStructuralTestCase(unittest.TestCase):
 
     def test_valid_entity_claim(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+            subject_id="character:jean", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
         )
         self.assertEqual(claim.predicate, Predicate.SPOUSE_OF)
 
     def test_valid_value_claim(self):
         claim = make_claim(
-            subject_id="char:jean", predicate=Predicate.OCCUPATION, value="mayor"
+            subject_id="character:jean", predicate=Predicate.OCCUPATION, value="mayor"
         )
         self.assertEqual(claim.value, "mayor")
 
     def test_rejects_missing_object_and_value(self):
         with self.assertRaises(Exception):
-            make_claim(subject_id="char:jean", predicate=Predicate.LIVES_IN)
+            make_claim(subject_id="character:jean", predicate=Predicate.LIVES_IN)
 
     def test_rejects_blank_value(self):
         with self.assertRaises(Exception):
             make_claim(
-                subject_id="char:jean", predicate=Predicate.OCCUPATION, value="   "
+                subject_id="character:jean", predicate=Predicate.OCCUPATION, value="   "
             )
 
     def test_rejects_malformed_entity_id(self):
         with self.assertRaises(Exception):
             make_claim(
-                subject_id="Jean", predicate=Predicate.SPOUSE_OF, object_id="char:marie"
+                subject_id="Jean", predicate=Predicate.SPOUSE_OF, object_id="character:marie"
             )
 
     def test_rejects_confidence_out_of_bounds(self):
         for bad in (-0.1, 1.5):
             with self.assertRaises(Exception):
                 make_claim(
-                    subject_id="char:jean",
+                    subject_id="character:jean",
                     predicate=Predicate.KNOWS,
-                    object_id="char:marie",
+                    object_id="character:marie",
                     confidence=bad,
                 )
 
     def test_auto_id_increments(self):
-        a = make_claim(subject_id="char:jean", predicate=Predicate.KNOWS, object_id="char:x")
-        b = make_claim(subject_id="char:jean", predicate=Predicate.KNOWS, object_id="char:x")
+        a = make_claim(subject_id="character:jean", predicate=Predicate.KNOWS, object_id="character:x")
+        b = make_claim(subject_id="character:jean", predicate=Predicate.KNOWS, object_id="character:x")
         self.assertNotEqual(a.id, b.id)
         self.assertTrue(a.id.startswith("claim:"))
 
@@ -106,7 +112,7 @@ class ClaimStructuralTestCase(unittest.TestCase):
         # A bad nested SourceLocator (invalid path) must fail claim construction.
         with self.assertRaises(Exception):
             make_claim(
-                subject_id="char:jean",
+                subject_id="character:jean",
                 predicate=Predicate.OCCUPATION,
                 value="mayor",
                 sources=[SourceLocator(source_type=SourceType.PDF, title="t", id="doc:abc12345", path="/abs/x.pdf")],
@@ -114,7 +120,7 @@ class ClaimStructuralTestCase(unittest.TestCase):
 
     def test_sources_accept_source_refs(self):
         claim = make_claim(
-            subject_id="char:jean",
+            subject_id="character:jean",
             predicate=Predicate.OCCUPATION,
             value="mayor",
             sources=[SourceRef(locator_id="source:001", page_index=2)],
