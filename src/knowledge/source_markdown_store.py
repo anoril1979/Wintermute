@@ -27,6 +27,7 @@ language)::
     # Source : Dark Earth - Le marcheur (Gazette #1).pdf
 
     - Id: doc:3fa2b81c
+    - Type: pdf
     - Title: Dark Earth - Le marcheur (Gazette #1)
     - File: Dark Earth - Le marcheur (Gazette #1).pdf
     - Path: data/sources/pdf/Dark Earth - Le marcheur (Gazette #1).pdf
@@ -97,6 +98,38 @@ class SourceMarkdownError(ValueError):
 
 
 # ---------------------------------------------------------------------------
+# Document type (readable, extension-derived)
+# ---------------------------------------------------------------------------
+
+#: Extension -> document type (the knowledge layer's ``SourceType``
+#: vocabulary, src/knowledge/models.py). Keys lowercase, with the dot;
+#: unknown/absent extensions fall back to ``other``.
+_EXTENSION_TYPES: Dict[str, str] = {
+    ".pdf": "pdf",
+    ".txt": "text",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".html": "html",
+    ".htm": "html",
+    ".docx": "word",
+    ".doc": "word",
+    ".odt": "openoffice",
+    ".url": "url",
+}
+
+
+def document_type_for(source_path: str) -> str:
+    """Readable document type for a source path (``SourceType`` vocabulary).
+
+    Derived from the file extension — ``Gazette.pdf`` → ``pdf`` — with
+    ``other`` for unknown or extension-less names (the readable field must
+    always exist, even when the derivation has nothing to bite on).
+    """
+    suffix = Path(str(source_path or "")).suffix.lower()
+    return _EXTENSION_TYPES.get(suffix, "other")
+
+
+# ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
 
@@ -143,6 +176,7 @@ def write_source(
     chapters: int,
     pages: int,
     registration_path: Path,
+    doc_type: str = "",
 ) -> Path:
     """(Re)write one source registration (pretty UTF-8, atomic).
 
@@ -152,6 +186,8 @@ def write_source(
 
     Args:
         doc_id: the document's unified id (``doc:<8hex>``).
+        doc_type: readable document type (``SourceType`` vocabulary, e.g.
+            ``pdf``); empty writes ``other`` (the field always exists).
         title: extraction title (usually the file stem).
         file_name: source file name with extension.
         path: source path as resolved at ingestion (project-relative when
@@ -165,6 +201,7 @@ def write_source(
     Returns the written path.
     """
     doc_id = doc_id.strip()
+    doc_type = (doc_type or "").strip().lower() or "other"
     title = (title or "").strip() or _UNTITLED
     file_name = (file_name or "").strip()
     path = (path or "").strip()
@@ -177,6 +214,7 @@ def write_source(
         f"{SOURCE_TITLE_PREFIX}{title}",
         "",
         f"- Id: {doc_id}",
+        f"- Type: {doc_type}",
         f"- Title: {title}",
         f"- File: {file_name}",
         f"- Path: {path}",
@@ -243,6 +281,7 @@ def read_source(path: Path) -> Dict[str, object]:
         raise SourceMarkdownError(f"{path}: missing '- Id: doc:<8hex>' line")
     return {
         "doc_id": doc_id,
+        "type": fields.get("type", ""),
         "title": title or fields.get("title", ""),
         "file": fields.get("file", ""),
         "path": fields.get("path", ""),
@@ -353,6 +392,7 @@ __all__ = [
     "SOURCES_SUBDIR",
     "SOURCE_TITLE_PREFIX",
     "SourceMarkdownError",
+    "document_type_for",
     "filename_for_doc_id",
     "format_listing_line",
     "listing_path_for",

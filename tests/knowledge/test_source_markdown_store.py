@@ -18,6 +18,7 @@ from src.knowledge.source_markdown_store import (
     LISTING_FILENAME,
     SOURCE_TITLE_PREFIX,
     SourceMarkdownError,
+    document_type_for,
     filename_for_doc_id,
     format_listing_line,
     listing_path_for,
@@ -45,6 +46,8 @@ def _write(base: Path, doc_id: str = "doc:3fa2b81c", **overrides) -> Path:
         registration_path=source_path_for(doc_id, base),
     )
     kwargs.update(overrides)
+    # Like the agent: the readable type derives from the source path.
+    kwargs.setdefault("doc_type", document_type_for(kwargs["path"]))
     return write_source(**kwargs)
 
 
@@ -56,6 +59,27 @@ class FilenameTest(unittest.TestCase):
         for bad in ("doc:XYZ", "doc:3fa2b81", "source:001", "", "doc:3fa2b81c::chp:1"):
             with self.assertRaises(SourceMarkdownError, msg=bad):
                 filename_for_doc_id(bad)
+
+
+class DocumentTypeTest(unittest.TestCase):
+    def test_extension_derives_the_type(self):
+        for path, expected in (
+            ("data/sources/pdf/Gazette.pdf", "pdf"),
+            ("data/sources/text/notes.txt", "text"),
+            ("data/sources/text/notes.md", "markdown"),
+            ("data/sources/html/page.htm", "html"),
+            ("data/sources/word/report.docx", "word"),
+            ("data/sources/openoffice/thesis.odt", "openoffice"),
+        ):
+            self.assertEqual(document_type_for(path), expected, path)
+
+    def test_unknown_or_missing_extension_falls_back_to_other(self):
+        self.assertEqual(document_type_for("data/sources/pdf/Gazette.weird"), "other")
+        self.assertEqual(document_type_for("no-extension"), "other")
+        self.assertEqual(document_type_for(""), "other")
+
+    def test_extension_case_does_not_matter(self):
+        self.assertEqual(document_type_for("Gazette.PDF"), "pdf")
 
 
 class SourceFileTest(unittest.TestCase):
@@ -70,6 +94,7 @@ class SourceFileTest(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertIn(f"{SOURCE_TITLE_PREFIX}Gazette #1", text)
         self.assertIn("- Id: doc:3fa2b81c", text)
+        self.assertIn("- Type: pdf", text)
         self.assertIn("- File: Dark Earth - Gazette #1.pdf", text)
         self.assertIn("- Origin: community", text)
         self.assertIn("- Chapters: 5", text)
@@ -80,6 +105,7 @@ class SourceFileTest(unittest.TestCase):
         path = _write(self.base)
         data = read_source(path)
         self.assertEqual(data["doc_id"], "doc:3fa2b81c")
+        self.assertEqual(data["type"], "pdf")
         self.assertEqual(data["title"], "Gazette #1")
         self.assertEqual(data["file"], "Dark Earth - Gazette #1.pdf")
         self.assertEqual(data["origin"], "community")
@@ -234,6 +260,7 @@ class SourceRegistrationAgentTest(unittest.TestCase):
         self.assertTrue(registration.is_file())
         data = read_source(registration)
         self.assertEqual(data["doc_id"], document.id)
+        self.assertEqual(data["type"], "pdf", "extension-derived, readable")
         self.assertEqual(data["title"], "Gazette")
         self.assertEqual(data["file"], "Gazette.pdf")
         self.assertEqual(data["origin"], "canon")
@@ -258,6 +285,7 @@ class SourceRegistrationAgentTest(unittest.TestCase):
         result = self.agent.run(self._context(document))
         self.assertEqual(result.status.value, "ok")
         self.assertFalse(result.payload["created"], "same id = refresh, not create")
+        self.assertEqual(result.payload["type"], "pdf")
         data = read_source(registration)
         self.assertEqual(data["pages"], 9)
         self.assertIn("Hand-written note.", data["notes"])

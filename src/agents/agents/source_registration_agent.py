@@ -41,6 +41,7 @@ from src.agents.protocols import AgentResult, AgentStatus, FailureDomain
 from src.extraction.models import DocumentExtract
 from src.knowledge.source_markdown_store import (
     SourceMarkdownError,
+    document_type_for,
     listing_path_for,
     rebuild_listing,
     source_path_for,
@@ -111,6 +112,9 @@ class SourceRegistrationAgent:
             file_name = Path(document.source_path).name if document.source_path else ""
             write_source(
                 doc_id=doc_id,
+                # Readable document type, extension-derived (SourceType
+                # vocabulary; 'other' when the extension says nothing).
+                doc_type=document_type_for(document.source_path),
                 title=document.title,
                 file_name=file_name,
                 path=document.source_path,
@@ -135,6 +139,7 @@ class SourceRegistrationAgent:
         payload = {
             "doc_id": doc_id,
             "file": registration_path.name,
+            "type": document_type_for(document.source_path),
             "created": created,
             "listing": str(listing_path),
             "chapters": len(document.chapters),
