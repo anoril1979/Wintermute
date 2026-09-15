@@ -86,6 +86,9 @@ class IngestionGraph:
         # check-n-merge: the EntityResolver reconciles the discovered
         # entities into the markdown knowledge base (create-or-merge).
         GraphStep(name="check_and_merge", agent_key="entity_resolver"),
+        # Source registration: the document itself becomes a knowledge
+        # entity (metadata markdown + sources.md listing).
+        GraphStep(name="source_registration", agent_key="source_registrar"),
         GraphStep(name="indexation", agent_key="indexer"),
     ]
 

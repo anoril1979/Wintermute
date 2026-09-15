@@ -11,6 +11,8 @@ The ingestion pipeline projects one source document onto several stores:
     data/cache/knowledge/<stem>.json  the knowledge cache (characters...)
     data/knowledge/characters/*.md   the knowledge base (alias-source ids
                                      purged; empty characters deleted)
+    data/knowledge/sources/<doc>.md  the source registration (deleted:
+                                     the document leaves the base)
     data/extracted/mineru/<stem>/  MinerU's own sandbox (PDFs only)
 
 Removing a document from the corpus means cleaning **every projection**
@@ -256,6 +258,27 @@ def _purge_knowledge_base(doc_id: str) -> Dict[str, Any]:
                 "reason": f"knowledge base purge: {exc}"}
 
 
+def _remove_source_registration(doc_id: str) -> Dict[str, Any]:
+    """Remove the document's markdown registration from the knowledge base.
+
+    The registration (``<base>/sources/<doc_id>.md``) is the document's own
+    knowledge entity — its file is deleted and the ``sources.md`` listing
+    is rebuilt from the surviving files (single-writer rule: files are the
+    truth, the listing their projection, so the removed document's line
+    disappears by construction). A missing registration is a no-op (the
+    document was never registered — not an error, removal is idempotent).
+
+    Returns ``{"ok": bool, "removed": bool, "reason"?}``.
+    """
+    try:
+        from src.knowledge.source_markdown_store import remove_registration
+
+        removed = remove_registration(doc_id)
+        return {"ok": True, "removed": removed}
+    except Exception as exc:  # noqa: BLE001 — reported, not raised
+        return {"ok": False, "removed": False, "reason": f"source registration: {exc}"}
+
+
 def _remove_mineru_sandbox(source_path: Optional[Path], stem: str) -> Dict[str, Any]:
     """Remove MinerU's own working folder for the document, when present.
 
@@ -309,6 +332,7 @@ def remove_document(
                  "json_files":     {"ok": bool, "removed": [...], ...},
                  "knowledge_base": {"ok": bool, "purged_files": n,
                                     "deleted_files": n, ...},
+                 "source_registration": {"ok": bool, "removed": bool, ...},
                  "mineru":         {"ok": bool, "removed": str|None, ...},
               },
               "reason": str,   # only when partial/rejected
@@ -359,6 +383,7 @@ def remove_document(
         "job_files": _remove_job_entries(file_name),
         "json_files": _remove_json_files(resolved, resolved.stem),
         "knowledge_base": _purge_knowledge_base(doc_id),
+        "source_registration": _remove_source_registration(doc_id),
         "mineru": _remove_mineru_sandbox(resolved, resolved.stem),
     }
 

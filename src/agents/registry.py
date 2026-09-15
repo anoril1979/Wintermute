@@ -19,6 +19,7 @@ from src.agents.agents.knowledge_validation_agent import KnowledgeValidatorAgent
 from src.agents.agents.pdf_extraction_agent import PDFExtractionAgent
 from src.agents.agents.semantic_retrieval_agent import SemanticRetrievalAgent
 from src.agents.agents.source_indexing_agent import SourceIndexingAgent
+from src.agents.agents.source_registration_agent import SourceRegistrationAgent
 from src.agents.agents.summarizer_agent import SummarizerAgent
 from src.agents.protocols import IngestionAgent
 
@@ -41,6 +42,9 @@ def build_default_agents() -> Dict[str, IngestionAgent]:
         # check_and_merge: reconcile discovered characters into the
         # markdown knowledge base (create-or-merge, no LLM).
         "entity_resolver": CharacterResolver(),
+        # The document itself becomes a knowledge entity: a markdown
+        # registration file named by its unified id (no LLM).
+        "source_registrar": SourceRegistrationAgent(),
     }
 
 

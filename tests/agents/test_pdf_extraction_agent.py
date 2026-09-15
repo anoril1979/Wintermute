@@ -247,6 +247,8 @@ class OrchestratorPlugTest(unittest.TestCase):
         # so the graph stops at check_and_merge (this test pins the graph
         # wiring, not the resolver internals — see test_entity_resolver_agent).
         registry.pop("entity_resolver", None)
+        # Same for the source registrar (writes data/knowledge/sources).
+        registry.pop("source_registrar", None)
         registry.update(overrides)
         return registry
 
